@@ -1,0 +1,48 @@
+@"
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+
+# IDE / editor
+.idea/
+.vscode/
+
+# Logs
+*.log
+logs/
+
+# Local data / databases / dumps
+data/
+datasets/
+exports/
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.backup
+*.bak
+*.csv
+*.jsonl
+*.parquet
+
+# Docker / local volumes
+pgdata/
+postgres_data/
+timescaledb_data/
+pgadmin_data/
+
+# OS
+.DS_Store
+Thumbs.db
+"@ | Set-Content .gitignore
