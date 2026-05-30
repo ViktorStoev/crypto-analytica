@@ -1,0 +1,488 @@
+[1mdiff --git a/scripts/analyze_symbol.py b/scripts/analyze_symbol.py[m
+[1mindex dd54fc8..70857d0 100644[m
+[1m--- a/scripts/analyze_symbol.py[m
+[1m+++ b/scripts/analyze_symbol.py[m
+[36m@@ -1,6 +1,7 @@[m
+ import os[m
+ import sys[m
+ import json[m
+[32m+[m[32mfrom decimal import Decimal[m
+ from typing import Optional[m
+ [m
+ import pandas as pd[m
+[36m@@ -9,8 +10,11 @@[m [mfrom sqlalchemy import create_engine, text[m
+ [m
+ def get_database_url() -> str:[m
+     """[m
+[31m-    Берём DATABASE_URL из .env.[m
+[31m-    Если DATABASE_URL обычный postgresql://..., адаптируем его под SQLAlchemy + psycopg3.[m
+[32m+[m[32m    Возвращает строку подключения к PostgreSQL.[m
+[32m+[m
+[32m+[m[32m    Важно:[m
+[32m+[m[32m    у нас установлен psycopg v3, поэтому для SQLAlchemy используем:[m
+[32m+[m[32m    postgresql+psycopg://...[m
+     """[m
+     database_url = os.getenv("DATABASE_URL")[m
+ [m
+[36m@@ -41,16 +45,65 @@[m [mdef get_database_url() -> str:[m
+ [m
+ [m
+ def safe_float(value) -> Optional[float]:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Аккуратно переводит значения из PostgreSQL / pandas в float.[m
+[32m+[m
+[32m+[m[32m    Почему это нужно:[m
+[32m+[m[32m    PostgreSQL numeric часто приходит как Decimal,[m
+[32m+[m[32m    а пустые значения могут приходить как None или NaN.[m
+[32m+[m[32m    """[m
+     if value is None:[m
+         return None[m
+ [m
+     if pd.isna(value):[m
+         return None[m
+ [m
+[32m+[m[32m    if isinstance(value, Decimal):[m
+[32m+[m[32m        return float(value)[m
+[32m+[m
+     return float(value)[m
+ [m
+ [m
+[32m+[m[32mdef round_or_none(value, digits: int = 2):[m
+[32m+[m[32m    value = safe_float(value)[m
+[32m+[m
+[32m+[m[32m    if value is None:[m
+[32m+[m[32m        return None[m
+[32m+[m
+[32m+[m[32m    return round(value, digits)[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef normalize_open_interest_interval(candle_interval: str) -> str:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    В candles Bybit interval хранится как '60'.[m
+[32m+[m[32m    В open_interest Bybit interval хранится как '1h'.[m
+[32m+[m
+[32m+[m[32m    Поэтому для анализа BTCUSDT 60 нужно читать open_interest BTCUSDT 1h.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    mapping = {[m
+[32m+[m[32m        "1": "5min",[m
+[32m+[m[32m        "5": "5min",[m
+[32m+[m[32m        "15": "15min",[m
+[32m+[m[32m        "30": "30min",[m
+[32m+[m[32m        "60": "1h",[m
+[32m+[m[32m        "120": "2h",[m
+[32m+[m[32m        "240": "4h",[m
+[32m+[m[32m        "360": "6h",[m
+[32m+[m[32m        "720": "12h",[m
+[32m+[m[32m        "D": "1d",[m
+[32m+[m[32m        "1D": "1d",[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m[32m    return mapping.get(candle_interval, candle_interval)[m
+[32m+[m
+[32m+[m
+ def get_latest_market_row(engine, symbol: str, interval: str) -> Optional[dict]:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Берём последнюю свечу и уже рассчитанные индикаторы.[m
+[32m+[m
+[32m+[m[32m    Тут мы НЕ считаем индикаторы заново.[m
+[32m+[m[32m    Они уже должны быть в таблице indicators.[m
+[32m+[m[32m    """[m
+     query = text("""[m
+         SELECT[m
+             c.symbol,[m
+[36m@@ -99,30 +152,31 @@[m [mdef get_latest_market_row(engine, symbol: str, interval: str) -> Optional[dict]:[m
+ [m
+ def get_latest_ticker(engine, symbol: str) -> Optional[dict]:[m
+     """[m
+[31m-    Берём последний ticker.[m
+[31m-    Тут предполагаем, что в таблице tickers есть created_at.[m
+[31m-    Если у тебя колонка называется collected_at или snapshot_time,[m
+[31m-    замени ORDER BY created_at DESC на своё имя колонки.[m
+[32m+[m[32m    Берём последний ticker snapshot.[m
+[32m+[m
+[32m+[m[32m    В твоей таблице tickers время называется ts.[m
+[32m+[m[32m    Поэтому сортируем по ts DESC.[m
+     """[m
+     query = text("""[m
+         SELECT[m
+             symbol,[m
+[32m+[m[32m            ts,[m
+             last_price,[m
+             mark_price,[m
+             index_price,[m
+             funding_rate,[m
+[31m-            open_interest,[m
+[31m-            created_at[m
+[32m+[m[32m            open_interest[m
+         FROM tickers[m
+         WHERE symbol = :symbol[m
+[31m-        ORDER BY created_at DESC[m
+[32m+[m[32m        ORDER BY ts DESC[m
+         LIMIT 1[m
+     """)[m
+ [m
+[31m-    try:[m
+[31m-        df = pd.read_sql(query, engine, params={"symbol": symbol})[m
+[31m-    except Exception:[m
+[31m-        return None[m
+[32m+[m[32m    df = pd.read_sql([m
+[32m+[m[32m        query,[m
+[32m+[m[32m        engine,[m
+[32m+[m[32m        params={"symbol": symbol},[m
+[32m+[m[32m    )[m
+ [m
+     if df.empty:[m
+         return None[m
+[36m@@ -130,48 +184,25 @@[m [mdef get_latest_ticker(engine, symbol: str) -> Optional[dict]:[m
+     return df.iloc[0].to_dict()[m
+ [m
+ [m
+[31m-def get_open_interest_history(engine, symbol: str, interval: str) -> pd.DataFrame:[m
+[31m-    query = text("""[m
+[31m-        SELECT[m
+[31m-            open_time,[m
+[31m-            open_interest[m
+[31m-        FROM open_interest[m
+[31m-        WHERE symbol = :symbol[m
+[31m-          AND interval = :interval[m
+[31m-        ORDER BY open_time DESC[m
+[31m-        LIMIT 25[m
+[31m-    """)[m
+[31m-[m
+[31m-    try:[m
+[31m-        return pd.read_sql([m
+[31m-            query,[m
+[31m-            engine,[m
+[31m-            params={[m
+[31m-                "symbol": symbol,[m
+[31m-                "interval": interval,[m
+[31m-            },[m
+[31m-        )[m
+[31m-    except Exception:[m
+[31m-        return pd.DataFrame()[m
+[31m-[m
+[31m-[m
+ def get_latest_funding_rate(engine, symbol: str) -> Optional[float]:[m
+     """[m
+[31m-    Основной вариант — берём funding_rate из funding_rates.[m
+[31m-    Если не получилось — можно будет использовать funding_rate из tickers.[m
+[32m+[m[32m    Берём последний funding rate из таблицы funding_rates.[m
+     """[m
+     query = text("""[m
+[31m-        SELECT funding_rate[m
+[32m+[m[32m        SELECT[m
+[32m+[m[32m            funding_time,[m
+[32m+[m[32m            funding_rate[m
+         FROM funding_rates[m
+         WHERE symbol = :symbol[m
+         ORDER BY funding_time DESC[m
+         LIMIT 1[m
+     """)[m
+ [m
+[31m-    try:[m
+[31m-        df = pd.read_sql(query, engine, params={"symbol": symbol})[m
+[31m-    except Exception:[m
+[31m-        return None[m
+[32m+[m[32m    df = pd.read_sql([m
+[32m+[m[32m        query,[m
+[32m+[m[32m        engine,[m
+[32m+[m[32m        params={"symbol": symbol},[m
+[32m+[m[32m    )[m
+ [m
+     if df.empty:[m
+         return None[m
+[36m@@ -179,7 +210,44 @@[m [mdef get_latest_funding_rate(engine, symbol: str) -> Optional[float]:[m
+     return safe_float(df.iloc[0]["funding_rate"])[m
+ [m
+ [m
+[32m+[m[32mdef get_open_interest_history(engine, symbol: str, candle_interval: str) -> pd.DataFrame:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Берём историю open interest.[m
+[32m+[m
+[32m+[m[32m    Важно:[m
+[32m+[m[32m    candles interval = 60[m
+[32m+[m[32m    open_interest interval = 1h[m
+[32m+[m[32m    """[m
+[32m+[m[32m    oi_interval = normalize_open_interest_interval(candle_interval)[m
+[32m+[m
+[32m+[m[32m    query = text("""[m
+[32m+[m[32m        SELECT[m
+[32m+[m[32m            ts,[m
+[32m+[m[32m            open_interest[m
+[32m+[m[32m        FROM open_interest[m
+[32m+[m[32m        WHERE symbol = :symbol[m
+[32m+[m[32m          AND interval = :interval[m
+[32m+[m[32m        ORDER BY ts DESC[m
+[32m+[m[32m        LIMIT 25[m
+[32m+[m[32m    """)[m
+[32m+[m
+[32m+[m[32m    return pd.read_sql([m
+[32m+[m[32m        query,[m
+[32m+[m[32m        engine,[m
+[32m+[m[32m        params={[m
+[32m+[m[32m            "symbol": symbol,[m
+[32m+[m[32m            "interval": oi_interval,[m
+[32m+[m[32m        },[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m
+ def interpret_trend(price, ema_20, ema_50, ema_200) -> dict:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Простая оценка тренда по цене и EMA.[m
+[32m+[m
+[32m+[m[32m    Это не торговый сигнал.[m
+[32m+[m[32m    Это только текстовое описание структуры рынка.[m
+[32m+[m[32m    """[m
+     if None in [price, ema_20, ema_50, ema_200]:[m
+         return {[m
+             "direction": "unknown",[m
+[36m@@ -189,25 +257,25 @@[m [mdef interpret_trend(price, ema_20, ema_50, ema_200) -> dict:[m
+     if price > ema_20 > ema_50 > ema_200:[m
+         return {[m
+             "direction": "bullish",[m
+[31m-            "comment": "Цена выше EMA 20/50/200, структура тренда выглядит восходящей."[m
+[32m+[m[32m            "comment": "Цена выше EMA 20/50/200, структура выглядит восходящей."[m
+         }[m
+ [m
+     if price < ema_20 < ema_50 < ema_200:[m
+         return {[m
+             "direction": "bearish",[m
+[31m-            "comment": "Цена ниже EMA 20/50/200, структура тренда выглядит нисходящей."[m
+[32m+[m[32m            "comment": "Цена ниже EMA 20/50/200, структура выглядит нисходящей."[m
+         }[m
+ [m
+     if price > ema_200:[m
+         return {[m
+             "direction": "mixed_bullish",[m
+[31m-            "comment": "Цена выше EMA 200, но EMA 20/50/200 не выстроены идеально. Тренд скорее смешанный с бычьим уклоном."[m
+[32m+[m[32m            "comment": "Цена выше EMA 200, но средние не выстроены идеально. Картина смешанная с бычьим уклоном."[m
+         }[m
+ [m
+     if price < ema_200:[m
+         return {[m
+             "direction": "mixed_bearish",[m
+[31m-            "comment": "Цена ниже EMA 200, но EMA 20/50/200 не выстроены идеально. Тренд скорее смешанный с медвежьим уклоном."[m
+[32m+[m[32m            "comment": "Цена ниже EMA 200, но средние не выстроены идеально. Картина смешанная с медвежьим уклоном."[m
+         }[m
+ [m
+     return {[m
+[36m@@ -240,6 +308,34 @@[m [mdef interpret_rsi(rsi: Optional[float]) -> dict:[m
+     }[m
+ [m
+ [m
+[32m+[m[32mdef interpret_macd(macd_line, macd_signal, macd_hist) -> dict:[m
+[32m+[m[32m    macd_line = safe_float(macd_line)[m
+[32m+[m[32m    macd_signal = safe_float(macd_signal)[m
+[32m+[m[32m    macd_hist = safe_float(macd_hist)[m
+[32m+[m
+[32m+[m[32m    if None in [macd_line, macd_signal, macd_hist]:[m
+[32m+[m[32m        return {[m
+[32m+[m[32m            "line": None,[m
+[32m+[m[32m            "signal": None,[m
+[32m+[m[32m            "hist": None,[m
+[32m+[m[32m            "comment": "MACD пока недоступен."[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m    if macd_line > macd_signal and macd_hist > 0:[m
+[32m+[m[32m        comment = "MACD выше сигнальной линии, импульс улучшается."[m
+[32m+[m[32m    elif macd_line < macd_signal and macd_hist < 0:[m
+[32m+[m[32m        comment = "MACD ниже сигнальной линии, импульс ослабевает."[m
+[32m+[m[32m    else:[m
+[32m+[m[32m        comment = "MACD показывает смешанную картину, сильного подтверждения импульса нет."[m
+[32m+[m
+[32m+[m[32m    return {[m
+[32m+[m[32m        "line": round(macd_line, 4),[m
+[32m+[m[32m        "signal": round(macd_signal, 4),[m
+[32m+[m[32m        "hist": round(macd_hist, 4),[m
+[32m+[m[32m        "comment": comment[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m
+ def interpret_volume(volume: Optional[float], volume_sma_20: Optional[float]) -> dict:[m
+     if volume is None or volume_sma_20 is None or volume_sma_20 == 0:[m
+         return {[m
+[36m@@ -252,11 +348,11 @@[m [mdef interpret_volume(volume: Optional[float], volume_sma_20: Optional[float]) ->[m
+     ratio = volume / volume_sma_20[m
+ [m
+     if ratio >= 1.8:[m
+[31m-        comment = "Текущий объём значительно выше среднего — движение подтверждается повышенной активностью."[m
+[32m+[m[32m        comment = "Текущий объём значительно выше среднего — активность заметно повышена."[m
+     elif ratio >= 1.2:[m
+[31m-        comment = "Текущий объём выше среднего — активность на рынке повышена."[m
+[32m+[m[32m        comment = "Текущий объём выше среднего — движение частично подтверждается объёмом."[m
+     elif ratio <= 0.7:[m
+[31m-        comment = "Текущий объём ниже среднего — движение пока слабее подтверждается объёмом."[m
+[32m+[m[32m        comment = "Текущий объём ниже среднего — движение пока слабо подтверждается объёмом."[m
+     else:[m
+         comment = "Текущий объём около среднего значения."[m
+ [m
+[36m@@ -297,6 +393,12 @@[m [mdef interpret_funding(funding_rate: Optional[float]) -> dict:[m
+ [m
+ [m
+ def interpret_open_interest(oi_df: pd.DataFrame) -> dict:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Смотрим изменение open interest примерно за 24 часа.[m
+[32m+[m
+[32m+[m[32m    Так как сейчас анализируем 1h open interest,[m
+[32m+[m[32m    24 строки назад — это примерно сутки назад.[m
+[32m+[m[32m    """[m
+     if oi_df.empty or len(oi_df) < 2:[m
+         return {[m
+             "value": None,[m
+[36m@@ -309,7 +411,6 @@[m [mdef interpret_open_interest(oi_df: pd.DataFrame) -> dict:[m
+ [m
+     latest_oi = oi_df.iloc[0]["open_interest"][m
+ [m
+[31m-    # Так как interval=60, 24 строки назад примерно равно 24 часам.[m
+     if len(oi_df) >= 25:[m
+         previous_oi = oi_df.iloc[24]["open_interest"][m
+     else:[m
+[36m@@ -338,71 +439,83 @@[m [mdef interpret_open_interest(oi_df: pd.DataFrame) -> dict:[m
+     }[m
+ [m
+ [m
+[31m-def main() -> None:[m
+[31m-    if len(sys.argv) != 3:[m
+[31m-        print("Usage: python scripts/analyze_symbol.py BTCUSDT 60")[m
+[31m-        sys.exit(1)[m
+[31m-[m
+[31m-    symbol = sys.argv[1].upper()[m
+[31m-    interval = sys.argv[2][m
+[31m-[m
+[31m-    engine = create_engine(get_database_url())[m
+[31m-[m
+[32m+[m[32mdef build_analysis(engine, symbol: str, interval: str) -> dict:[m
+     latest = get_latest_market_row(engine, symbol, interval)[m
+ [m
+     if latest is None:[m
+[31m-        print(json.dumps({[m
+[32m+[m[32m        return {[m
+             "symbol": symbol,[m
+             "interval": interval,[m
+[31m-            "error": "No candle + indicator data found. Run calculate_indicators.py first."[m
+[31m-        }, indent=2, ensure_ascii=False))[m
+[31m-        sys.exit(1)[m
+[32m+[m[32m            "error": "Нет данных candles + indicators. Сначала запусти calculate_indicators.py."[m
+[32m+[m[32m        }[m
+ [m
+     ticker = get_latest_ticker(engine, symbol)[m
+     oi_history = get_open_interest_history(engine, symbol, interval)[m
+ [m
+[31m-    price = safe_float(latest["close_price"])[m
+[32m+[m[32m    candle_close_price = safe_float(latest["close_price"])[m
+[32m+[m
+[32m+[m[32m    ticker_last_price = None[m
+[32m+[m[32m    ticker_mark_price = None[m
+[32m+[m[32m    ticker_index_price = None[m
+[32m+[m[32m    ticker_open_interest = None[m
+[32m+[m
+[32m+[m[32m    if ticker is not None:[m
+[32m+[m[32m        ticker_last_price = safe_float(ticker.get("last_price"))[m
+[32m+[m[32m        ticker_mark_price = safe_float(ticker.get("mark_price"))[m
+[32m+[m[32m        ticker_index_price = safe_float(ticker.get("index_price"))[m
+[32m+[m[32m        ticker_open_interest = safe_float(ticker.get("open_interest"))[m
+[32m+[m
+[32m+[m[32m    # Для текущей цены берём ticker last_price, если он есть.[m
+[32m+[m[32m    # Если ticker недоступен, используем close_price последней свечи.[m
+[32m+[m[32m    current_price = ticker_last_price if ticker_last_price is not None else candle_close_price[m
+[32m+[m
+     ema_20 = safe_float(latest["ema_20"])[m
+     ema_50 = safe_float(latest["ema_50"])[m
+     ema_200 = safe_float(latest["ema_200"])[m
+     rsi_14 = safe_float(latest["rsi_14"])[m
+     volume = safe_float(latest["volume"])[m
+     volume_sma_20 = safe_float(latest["volume_sma_20"])[m
+[31m-[m
+     funding_rate = get_latest_funding_rate(engine, symbol)[m
+ [m
+[32m+[m[32m    # Если funding_rates почему-то пустая, пробуем взять funding из ticker.[m
+     if funding_rate is None and ticker is not None:[m
+         funding_rate = safe_float(ticker.get("funding_rate"))[m
+ [m
+     analysis = {[m
+         "symbol": symbol,[m
+         "interval": interval,[m
+[31m-        "open_time": str(latest["open_time"]),[m
+[31m-        "price": price,[m
+[32m+[m[32m        "candle_time": str(latest["open_time"]),[m
+[32m+[m
+[32m+[m[32m        "price": {[m
+[32m+[m[32m            "current": round_or_none(current_price, 2),[m
+[32m+[m[32m            "last_candle_close": round_or_none(candle_close_price, 2),[m
+[32m+[m[32m            "mark_price": round_or_none(ticker_mark_price, 2),[m
+[32m+[m[32m            "index_price": round_or_none(ticker_index_price, 2),[m
+[32m+[m[32m        },[m
+ [m
+         "trend": interpret_trend([m
+[31m-            price=price,[m
+[32m+[m[32m            price=current_price,[m
+             ema_20=ema_20,[m
+             ema_50=ema_50,[m
+             ema_200=ema_200,[m
+         ),[m
+ [m
+[31m-        "rsi": interpret_rsi(rsi_14),[m
+[31m-[m
+         "ema": {[m
+[31m-            "ema_20": None if ema_20 is None else round(ema_20, 2),[m
+[31m-            "ema_50": None if ema_50 is None else round(ema_50, 2),[m
+[31m-            "ema_200": None if ema_200 is None else round(ema_200, 2),[m
+[32m+[m[32m            "ema_20": round_or_none(ema_20, 2),[m
+[32m+[m[32m            "ema_50": round_or_none(ema_50, 2),[m
+[32m+[m[32m            "ema_200": round_or_none(ema_200, 2),[m
+         },[m
+ [m
+[31m-        "macd": {[m
+[31m-            "line": None if safe_float(latest["macd_line"]) is None else round(safe_float(latest["macd_line"]), 4),[m
+[31m-            "signal": None if safe_float(latest["macd_signal"]) is None else round(safe_float(latest["macd_signal"]), 4),[m
+[31m-            "hist": None if safe_float(latest["macd_hist"]) is None else round(safe_float(latest["macd_hist"]), 4),[m
+[31m-        },[m
+[32m+[m[32m        "rsi": interpret_rsi(rsi_14),[m
+[32m+[m
+[32m+[m[32m        "macd": interpret_macd([m
+[32m+[m[32m            macd_line=latest["macd_line"],[m
+[32m+[m[32m            macd_signal=latest["macd_signal"],[m
+[32m+[m[32m            macd_hist=latest["macd_hist"],[m
+[32m+[m[32m        ),[m
+ [m
+         "atr": {[m
+[31m-            "atr_14": None if safe_float(latest["atr_14"]) is None else round(safe_float(latest["atr_14"]), 2),[m
+[32m+[m[32m            "atr_14": round_or_none(latest["atr_14"], 2),[m
+             "comment": "ATR показывает средний диапазон движения цены за последние свечи."[m
+         },[m
+ [m
+[36m@@ -414,8 +527,34 @@[m [mdef main() -> None:[m
+         "funding": interpret_funding(funding_rate),[m
+ [m
+         "open_interest": interpret_open_interest(oi_history),[m
+[32m+[m
+[32m+[m[32m        "ticker_open_interest": {[m
+[32m+[m[32m            "value": round_or_none(ticker_open_interest, 4),[m
+[32m+[m[32m            "comment": "Это open interest из последнего ticker snapshot. Для динамики используется история из таблицы open_interest."[m
+[32m+[m[32m        },[m
+[32m+[m
+[32m+[m[32m        "risk_note": "Это аналитический обзор по данным Bybit, а не финансовая рекомендация. Возможны ложные пробои, резкие выносы ликвидности и манипуляции."[m
+     }[m
+ [m
+[32m+[m[32m    return analysis[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef main() -> None:[m
+[32m+[m[32m    if len(sys.argv) != 3:[m
+[32m+[m[32m        print("Usage: python scripts/analyze_symbol.py BTCUSDT 60")[m
+[32m+[m[32m        sys.exit(1)[m
+[32m+[m
+[32m+[m[32m    symbol = sys.argv[1].upper()[m
+[32m+[m[32m    interval = sys.argv[2][m
+[32m+[m
+[32m+[m[32m    engine = create_engine(get_database_url())[m
+[32m+[m
+[32m+[m[32m    analysis = build_analysis([m
+[32m+[m[32m        engine=engine,[m
+[32m+[m[32m        symbol=symbol,[m
+[32m+[m[32m        interval=interval,[m
+[32m+[m[32m    )[m
+[32m+[m
+     print(json.dumps(analysis, indent=2, ensure_ascii=False))[m
+ [m
+ [m
