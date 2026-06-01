@@ -7,6 +7,7 @@ from typing import Optional
 import pandas as pd
 from sqlalchemy import create_engine, text
 from app.analytics.support_resistance import analyze_support_resistance
+from app.analytics.summary import build_summary
 
 
 def get_database_url() -> str:
@@ -560,6 +561,8 @@ def build_analysis(engine, symbol: str, interval: str) -> dict:
         "scenarios": support_resistance_analysis["scenarios"],
         "risk_note": "Это аналитический обзор по данным Bybit, а не финансовая рекомендация. Возможны ложные пробои, резкие выносы ликвидности и манипуляции."
     }
+
+    analysis["summary"] = build_summary(analysis)
 
     return analysis
 
