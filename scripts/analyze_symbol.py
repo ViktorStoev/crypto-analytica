@@ -6,6 +6,7 @@ from typing import Optional
 
 import pandas as pd
 from sqlalchemy import create_engine, text
+from app.analytics.support_resistance import analyze_support_resistance
 
 
 def get_database_url() -> str:
@@ -481,6 +482,28 @@ def build_analysis(engine, symbol: str, interval: str) -> dict:
     if funding_rate is None and ticker is not None:
         funding_rate = safe_float(ticker.get("funding_rate"))
 
+    if current_price is not None:
+        support_resistance_analysis = analyze_support_resistance(
+            symbol=symbol,
+            interval=interval,
+            current_price=current_price,
+            limit=240,
+        )
+    else:
+        support_resistance_analysis = {
+            "support_resistance": {
+                "support_levels": [],
+                "resistance_levels": [],
+                "method": "no_current_price",
+                "candles_used": 0,
+            },
+            "scenarios": {
+                "scenario_up": "Недостаточно данных для сценария роста.",
+                "scenario_down": "Недостаточно данных для сценария снижения.",
+                "neutral_summary": "Недостаточно данных для нейтрального сценария.",
+            },
+        }
+
     analysis = {
         "symbol": symbol,
         "interval": interval,
@@ -533,6 +556,8 @@ def build_analysis(engine, symbol: str, interval: str) -> dict:
             "comment": "Это open interest из последнего ticker snapshot. Для динамики используется история из таблицы open_interest."
         },
 
+        "support_resistance": support_resistance_analysis["support_resistance"],
+        "scenarios": support_resistance_analysis["scenarios"],
         "risk_note": "Это аналитический обзор по данным Bybit, а не финансовая рекомендация. Возможны ложные пробои, резкие выносы ликвидности и манипуляции."
     }
 
