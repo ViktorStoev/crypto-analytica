@@ -1,18 +1,19 @@
 ﻿"""
-Модуль поиска уровней поддержки/сопротивления.
+одуль поиска уровней поддержки/сопротивления.
 
-Идея простая:
-1. Берём последние свечи.
-2. Ищем локальные минимумы — кандидаты в поддержки.
-3. Ищем локальные максимумы — кандидаты в сопротивления.
-4. Оставляем ближайшие уровни к текущей цене.
-5. Формируем текстовые сценарии.
+дея простая:
+1. ерём последние свечи.
+2. щем локальные минимумы — кандидаты в поддержки.
+3. щем локальные максимумы — кандидаты в сопротивления.
+4. ставляем ближайшие уровни к текущей цене.
+5. Сценарии строим отдельно через app.analytics.scenarios.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from app.analytics.scenarios import build_market_scenarios
 from app.db import get_connection
 
 
@@ -42,9 +43,9 @@ def load_recent_candles(
     limit: int = 240,
 ) -> list[dict[str, Any]]:
     """
-    Загружаем последние свечи из БД.
+    агружаем последние свечи из .
 
-    Для 1h interval=60 и limit=240 это примерно последние 10 дней.
+    ля 1h interval=60 и limit=240 это примерно последние 10 дней.
     """
 
     query = """
@@ -81,7 +82,7 @@ def load_recent_candles(
             }
         )
 
-    # В БД мы брали DESC, а для анализа удобнее порядок от старых к новым.
+    #   мы брали DESC, а для анализа удобнее порядок от старых к новым.
     return list(reversed(candles))
 
 
@@ -94,7 +95,7 @@ def deduplicate_levels(
     Убираем уровни, которые находятся слишком близко друг к другу.
 
     tolerance_percent=0.002 означает 0.2%.
-    Для BTC около 73600 это примерно 147 долларов.
+    ля BTC около 73600 это примерно 147 долларов.
     """
 
     if not levels:
@@ -121,9 +122,9 @@ def find_support_resistance_levels(
     max_levels: int = 3,
 ) -> dict[str, Any]:
     """
-    Ищем уровни поддержки и сопротивления.
+    щем уровни поддержки и сопротивления.
 
-    Поддержка:
+    оддержка:
     локальный минимум, который находится ниже текущей цены.
 
     Сопротивление:
@@ -179,7 +180,7 @@ def find_support_resistance_levels(
         current_price=current_price,
     )
 
-    # Поддержки нужны ближайшие снизу: сортируем от текущей цены вниз.
+    # оддержки нужны ближайшие снизу: сортируем от текущей цены вниз.
     support_levels = sorted(
         support_candidates,
         key=lambda level: abs(current_price - level),
@@ -196,59 +197,6 @@ def find_support_resistance_levels(
         "resistance_levels": [round_price(level) for level in resistance_levels],
         "method": "local_pivots",
         "candles_used": len(candles),
-    }
-
-
-def build_market_scenarios(
-    current_price: float,
-    support_levels: list[float],
-    resistance_levels: list[float],
-) -> dict[str, str]:
-    nearest_support = support_levels[0] if support_levels else None
-    nearest_resistance = resistance_levels[0] if resistance_levels else None
-
-    if nearest_resistance is not None:
-        scenario_up = (
-            f"Если цена закрепится выше ближайшего сопротивления "
-            f"{nearest_resistance}, рынок может попробовать продолжить движение "
-            f"к следующей зоне сопротивления. Подтверждением будет рост объёма "
-            f"и удержание цены выше пробитого уровня."
-        )
-    else:
-        scenario_up = (
-            "Ближайшее сопротивление не определено. Для сценария роста нужно "
-            "дождаться формирования новой локальной зоны сверху."
-        )
-
-    if nearest_support is not None:
-        scenario_down = (
-            f"Если цена потеряет ближайшую поддержку {nearest_support}, "
-            f"это может усилить давление продавцов. В таком случае рынок может "
-            f"пойти к следующей зоне поддержки ниже."
-        )
-    else:
-        scenario_down = (
-            "Ближайшая поддержка не определена. Для сценария снижения нужно "
-            "дождаться формирования новой локальной зоны снизу."
-        )
-
-    if nearest_support is not None and nearest_resistance is not None:
-        neutral_summary = (
-            f"Пока цена находится между поддержкой {nearest_support} "
-            f"и сопротивлением {nearest_resistance}, рынок можно считать "
-            f"находящимся в локальном диапазоне. Пробой одной из границ "
-            f"даст более понятный сигнал."
-        )
-    else:
-        neutral_summary = (
-            "Локальный диапазон пока определён не полностью, поэтому сценарии "
-            "нужно оценивать осторожно."
-        )
-
-    return {
-        "scenario_up": scenario_up,
-        "scenario_down": scenario_down,
-        "neutral_summary": neutral_summary,
     }
 
 

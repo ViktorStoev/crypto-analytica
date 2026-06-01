@@ -1,9 +1,8 @@
-﻿import os
-from typing import Optional
-
-import pandas as pd
-from sqlalchemy import text
-
+from app.analytics.data_loader import get_database_url
+from app.analytics.data_loader import get_latest_funding_rate
+from app.analytics.data_loader import get_latest_market_row
+from app.analytics.data_loader import get_latest_ticker
+from app.analytics.data_loader import get_open_interest_history
 from app.analytics.derivatives import interpret_funding
 from app.analytics.derivatives import interpret_open_interest
 from app.analytics.momentum import interpret_atr
@@ -17,223 +16,6 @@ from app.analytics.utils import safe_float
 from app.analytics.volume import interpret_volume
 
 
-def get_database_url() -> str:
-    """
-    Возвращает строку подключения к PostgreSQL.
-
-    Важно:
-    у нас установлен psycopg v3, поэтому для SQLAlchemy используем:
-    postgresql+psycopg://...
-    """
-
-    database_url = os.getenv("DATABASE_URL")
-
-    if database_url:
-        if database_url.startswith("postgresql://"):
-            database_url = database_url.replace(
-                "postgresql://",
-                "postgresql+psycopg://",
-                1,
-            )
-
-        if database_url.startswith("postgres://"):
-            database_url = database_url.replace(
-                "postgres://",
-                "postgresql+psycopg://",
-                1,
-            )
-
-        return database_url
-
-    db_user = os.getenv("POSTGRES_USER", "crypto_app")
-    db_password = os.getenv("POSTGRES_PASSWORD", "crypto_app")
-    db_host = os.getenv("POSTGRES_HOST", "timescaledb")
-    db_port = os.getenv("POSTGRES_PORT", "5432")
-    db_name = os.getenv("POSTGRES_DB", "crypto_market")
-
-    return f"postgresql+psycopg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-
-
-def normalize_open_interest_interval(candle_interval: str) -> str:
-    """
-    В candles Bybit interval хранится как '60'.
-    В open_interest Bybit interval хранится как '1h'.
-
-    Поэтому для анализа BTCUSDT 60 нужно читать open_interest BTCUSDT 1h.
-    """
-
-    mapping = {
-        "1": "5min",
-        "5": "5min",
-        "15": "15min",
-        "30": "30min",
-        "60": "1h",
-        "120": "2h",
-        "240": "4h",
-        "360": "6h",
-        "720": "12h",
-        "D": "1d",
-        "1D": "1d",
-    }
-
-    return mapping.get(candle_interval, candle_interval)
-
-
-def get_latest_market_row(engine, symbol: str, interval: str) -> Optional[dict]:
-    """
-    Берём последнюю свечу и уже рассчитанные индикаторы.
-
-    Тут мы НЕ считаем индикаторы заново.
-    Они уже должны быть в таблице indicators.
-    """
-
-    query = text(
-        """
-        SELECT
-            c.symbol,
-            c.interval,
-            c.open_time,
-            c.open_price,
-            c.high_price,
-            c.low_price,
-            c.close_price,
-            c.volume,
-            i.ema_20,
-            i.ema_50,
-            i.ema_200,
-            i.rsi_14,
-            i.macd_line,
-            i.macd_signal,
-            i.macd_hist,
-            i.atr_14,
-            i.volume_sma_20
-        FROM candles c
-        JOIN indicators i
-          ON i.symbol = c.symbol
-         AND i.interval = c.interval
-         AND i.open_time = c.open_time
-        WHERE c.symbol = :symbol
-          AND c.interval = :interval
-        ORDER BY c.open_time DESC
-        LIMIT 1
-        """
-    )
-
-    df = pd.read_sql(
-        query,
-        engine,
-        params={
-            "symbol": symbol,
-            "interval": interval,
-        },
-    )
-
-    if df.empty:
-        return None
-
-    return df.iloc[0].to_dict()
-
-
-def get_latest_ticker(engine, symbol: str) -> Optional[dict]:
-    """
-    Берём последний ticker snapshot.
-
-    В таблице tickers время называется ts.
-    Поэтому сортируем по ts DESC.
-    """
-
-    query = text(
-        """
-        SELECT
-            symbol,
-            ts,
-            last_price,
-            mark_price,
-            index_price,
-            funding_rate,
-            open_interest
-        FROM tickers
-        WHERE symbol = :symbol
-        ORDER BY ts DESC
-        LIMIT 1
-        """
-    )
-
-    df = pd.read_sql(
-        query,
-        engine,
-        params={"symbol": symbol},
-    )
-
-    if df.empty:
-        return None
-
-    return df.iloc[0].to_dict()
-
-
-def get_latest_funding_rate(engine, symbol: str) -> Optional[float]:
-    """
-    Берём последний funding rate из таблицы funding_rates.
-    """
-
-    query = text(
-        """
-        SELECT
-            funding_time,
-            funding_rate
-        FROM funding_rates
-        WHERE symbol = :symbol
-        ORDER BY funding_time DESC
-        LIMIT 1
-        """
-    )
-
-    df = pd.read_sql(
-        query,
-        engine,
-        params={"symbol": symbol},
-    )
-
-    if df.empty:
-        return None
-
-    return safe_float(df.iloc[0]["funding_rate"])
-
-
-def get_open_interest_history(engine, symbol: str, candle_interval: str) -> pd.DataFrame:
-    """
-    Берём историю open interest.
-
-    Важно:
-    candles interval = 60
-    open_interest interval = 1h
-    """
-
-    oi_interval = normalize_open_interest_interval(candle_interval)
-
-    query = text(
-        """
-        SELECT
-            ts,
-            open_interest
-        FROM open_interest
-        WHERE symbol = :symbol
-          AND interval = :interval
-        ORDER BY ts DESC
-        LIMIT 25
-        """
-    )
-
-    return pd.read_sql(
-        query,
-        engine,
-        params={
-            "symbol": symbol,
-            "interval": oi_interval,
-        },
-    )
-
-
 def build_analysis(engine, symbol: str, interval: str) -> dict:
     latest = get_latest_market_row(engine, symbol, interval)
 
@@ -241,7 +23,7 @@ def build_analysis(engine, symbol: str, interval: str) -> dict:
         return {
             "symbol": symbol,
             "interval": interval,
-            "error": "Нет данных candles + indicators. Сначала запусти calculate_indicators.py.",
+            "error": "\u041dет данных candles + indicators. \u0421начала запусти calculate_indicators.py.",
         }
 
     ticker = get_latest_ticker(engine, symbol)
@@ -260,8 +42,8 @@ def build_analysis(engine, symbol: str, interval: str) -> dict:
         ticker_index_price = safe_float(ticker.get("index_price"))
         ticker_open_interest = safe_float(ticker.get("open_interest"))
 
-    # Для текущей цены берём ticker last_price, если он есть.
-    # Если ticker недоступен, используем close_price последней свечи.
+    # ля текущей цены берём ticker last_price, если он есть.
+    # сли ticker недоступен, используем close_price последней свечи.
     current_price = (
         ticker_last_price
         if ticker_last_price is not None
@@ -277,7 +59,7 @@ def build_analysis(engine, symbol: str, interval: str) -> dict:
 
     funding_rate = get_latest_funding_rate(engine, symbol)
 
-    # Если funding_rates почему-то пустая, пробуем взять funding из ticker.
+    # сли funding_rates почему-то пустая, пробуем взять funding из ticker.
     if funding_rate is None and ticker is not None:
         funding_rate = safe_float(ticker.get("funding_rate"))
 
@@ -297,9 +79,9 @@ def build_analysis(engine, symbol: str, interval: str) -> dict:
                 "candles_used": 0,
             },
             "scenarios": {
-                "scenario_up": "Недостаточно данных для сценария роста.",
-                "scenario_down": "Недостаточно данных для сценария снижения.",
-                "neutral_summary": "Недостаточно данных для нейтрального сценария.",
+                "scenario_up": "\u041dедостаточно данных для сценария роста.",
+                "scenario_down": "\u041dедостаточно данных для сценария снижения.",
+                "neutral_summary": "\u041dедостаточно данных для нейтрального сценария.",
             },
         }
 
@@ -339,11 +121,11 @@ def build_analysis(engine, symbol: str, interval: str) -> dict:
         "open_interest": interpret_open_interest(oi_history),
         "ticker_open_interest": {
             "value": round_or_none(ticker_open_interest, 4),
-            "comment": "Это open interest из последнего ticker snapshot. Для динамики используется история из таблицы open_interest.",
+            "comment": "\u042dто open interest из последнего ticker snapshot. \u0414ля динамики используется история из таблицы open_interest.",
         },
         "support_resistance": support_resistance_analysis["support_resistance"],
         "scenarios": support_resistance_analysis["scenarios"],
-        "risk_note": "Это аналитический обзор по данным Bybit, а не финансовая рекомендация. Возможны ложные пробои, резкие выносы ликвидности и манипуляции.",
+        "risk_note": "\u042dто аналитический обзор по данным Bybit, а не финансовая рекомендация. \u0412озможны ложные пробои, резкие выносы ликвидности и манипуляции.",
     }
 
     analysis["summary"] = build_summary(analysis)
