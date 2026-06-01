@@ -1,11 +1,20 @@
-import os
-from decimal import Decimal
+﻿import os
 from typing import Optional
 
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+
+from app.analytics.derivatives import interpret_funding
+from app.analytics.derivatives import interpret_open_interest
+from app.analytics.momentum import interpret_atr
+from app.analytics.momentum import interpret_macd
+from app.analytics.momentum import interpret_rsi
 from app.analytics.support_resistance import analyze_support_resistance
 from app.analytics.summary import build_summary
+from app.analytics.trend import interpret_trend
+from app.analytics.utils import round_or_none
+from app.analytics.utils import safe_float
+from app.analytics.volume import interpret_volume
 
 
 def get_database_url() -> str:
@@ -16,6 +25,7 @@ def get_database_url() -> str:
     у нас установлен psycopg v3, поэтому для SQLAlchemy используем:
     postgresql+psycopg://...
     """
+
     database_url = os.getenv("DATABASE_URL")
 
     if database_url:
@@ -44,35 +54,6 @@ def get_database_url() -> str:
     return f"postgresql+psycopg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
 
-def safe_float(value) -> Optional[float]:
-    """
-    Аккуратно переводит значения из PostgreSQL / pandas в float.
-
-    Почему это нужно:
-    PostgreSQL numeric часто приходит как Decimal,
-    а пустые значения могут приходить как None или NaN.
-    """
-    if value is None:
-        return None
-
-    if pd.isna(value):
-        return None
-
-    if isinstance(value, Decimal):
-        return float(value)
-
-    return float(value)
-
-
-def round_or_none(value, digits: int = 2):
-    value = safe_float(value)
-
-    if value is None:
-        return None
-
-    return round(value, digits)
-
-
 def normalize_open_interest_interval(candle_interval: str) -> str:
     """
     В candles Bybit interval хранится как '60'.
@@ -80,6 +61,7 @@ def normalize_open_interest_interval(candle_interval: str) -> str:
 
     Поэтому для анализа BTCUSDT 60 нужно читать open_interest BTCUSDT 1h.
     """
+
     mapping = {
         "1": "5min",
         "5": "5min",
@@ -104,7 +86,9 @@ def get_latest_market_row(engine, symbol: str, interval: str) -> Optional[dict]:
     Тут мы НЕ считаем индикаторы заново.
     Они уже должны быть в таблице indicators.
     """
-    query = text("""
+
+    query = text(
+        """
         SELECT
             c.symbol,
             c.interval,
@@ -114,7 +98,6 @@ def get_latest_market_row(engine, symbol: str, interval: str) -> Optional[dict]:
             c.low_price,
             c.close_price,
             c.volume,
-
             i.ema_20,
             i.ema_50,
             i.ema_200,
@@ -133,7 +116,8 @@ def get_latest_market_row(engine, symbol: str, interval: str) -> Optional[dict]:
           AND c.interval = :interval
         ORDER BY c.open_time DESC
         LIMIT 1
-    """)
+        """
+    )
 
     df = pd.read_sql(
         query,
@@ -154,10 +138,12 @@ def get_latest_ticker(engine, symbol: str) -> Optional[dict]:
     """
     Берём последний ticker snapshot.
 
-    В твоей таблице tickers время называется ts.
+    В таблице tickers время называется ts.
     Поэтому сортируем по ts DESC.
     """
-    query = text("""
+
+    query = text(
+        """
         SELECT
             symbol,
             ts,
@@ -170,7 +156,8 @@ def get_latest_ticker(engine, symbol: str) -> Optional[dict]:
         WHERE symbol = :symbol
         ORDER BY ts DESC
         LIMIT 1
-    """)
+        """
+    )
 
     df = pd.read_sql(
         query,
@@ -188,7 +175,9 @@ def get_latest_funding_rate(engine, symbol: str) -> Optional[float]:
     """
     Берём последний funding rate из таблицы funding_rates.
     """
-    query = text("""
+
+    query = text(
+        """
         SELECT
             funding_time,
             funding_rate
@@ -196,7 +185,8 @@ def get_latest_funding_rate(engine, symbol: str) -> Optional[float]:
         WHERE symbol = :symbol
         ORDER BY funding_time DESC
         LIMIT 1
-    """)
+        """
+    )
 
     df = pd.read_sql(
         query,
@@ -218,9 +208,11 @@ def get_open_interest_history(engine, symbol: str, candle_interval: str) -> pd.D
     candles interval = 60
     open_interest interval = 1h
     """
+
     oi_interval = normalize_open_interest_interval(candle_interval)
 
-    query = text("""
+    query = text(
+        """
         SELECT
             ts,
             open_interest
@@ -229,7 +221,8 @@ def get_open_interest_history(engine, symbol: str, candle_interval: str) -> pd.D
           AND interval = :interval
         ORDER BY ts DESC
         LIMIT 25
-    """)
+        """
+    )
 
     return pd.read_sql(
         query,
@@ -241,204 +234,6 @@ def get_open_interest_history(engine, symbol: str, candle_interval: str) -> pd.D
     )
 
 
-def interpret_trend(price, ema_20, ema_50, ema_200) -> dict:
-    """
-    Простая оценка тренда по цене и EMA.
-
-    Это не торговый сигнал.
-    Это только текстовое описание структуры рынка.
-    """
-    if None in [price, ema_20, ema_50, ema_200]:
-        return {
-            "direction": "unknown",
-            "comment": "Недостаточно данных для определения тренда."
-        }
-
-    if price > ema_20 > ema_50 > ema_200:
-        return {
-            "direction": "bullish",
-            "comment": "Цена выше EMA 20/50/200, структура выглядит восходящей."
-        }
-
-    if price < ema_20 < ema_50 < ema_200:
-        return {
-            "direction": "bearish",
-            "comment": "Цена ниже EMA 20/50/200, структура выглядит нисходящей."
-        }
-
-    if price > ema_200:
-        return {
-            "direction": "mixed_bullish",
-            "comment": "Цена выше EMA 200, но средние не выстроены идеально. Картина смешанная с бычьим уклоном."
-        }
-
-    if price < ema_200:
-        return {
-            "direction": "mixed_bearish",
-            "comment": "Цена ниже EMA 200, но средние не выстроены идеально. Картина смешанная с медвежьим уклоном."
-        }
-
-    return {
-        "direction": "neutral",
-        "comment": "Цена находится около ключевых средних, выраженного направления нет."
-    }
-
-
-def interpret_rsi(rsi: Optional[float]) -> dict:
-    if rsi is None:
-        return {
-            "value": None,
-            "comment": "RSI пока недоступен."
-        }
-
-    if rsi >= 70:
-        comment = "RSI выше 70 — рынок может быть перегрет вверх."
-    elif rsi <= 30:
-        comment = "RSI ниже 30 — рынок может быть перепродан."
-    elif rsi >= 55:
-        comment = "RSI выше нейтральной зоны — импульс умеренно сильный."
-    elif rsi <= 45:
-        comment = "RSI ниже нейтральной зоны — импульс ослаблен."
-    else:
-        comment = "RSI около нейтральной зоны, явного перекоса нет."
-
-    return {
-        "value": round(rsi, 2),
-        "comment": comment
-    }
-
-
-def interpret_macd(macd_line, macd_signal, macd_hist) -> dict:
-    macd_line = safe_float(macd_line)
-    macd_signal = safe_float(macd_signal)
-    macd_hist = safe_float(macd_hist)
-
-    if None in [macd_line, macd_signal, macd_hist]:
-        return {
-            "line": None,
-            "signal": None,
-            "hist": None,
-            "comment": "MACD пока недоступен."
-        }
-
-    if macd_line > macd_signal and macd_hist > 0:
-        comment = "MACD выше сигнальной линии, импульс улучшается."
-    elif macd_line < macd_signal and macd_hist < 0:
-        comment = "MACD ниже сигнальной линии, импульс ослабевает."
-    else:
-        comment = "MACD показывает смешанную картину, сильного подтверждения импульса нет."
-
-    return {
-        "line": round(macd_line, 4),
-        "signal": round(macd_signal, 4),
-        "hist": round(macd_hist, 4),
-        "comment": comment
-    }
-
-
-def interpret_volume(volume: Optional[float], volume_sma_20: Optional[float]) -> dict:
-    if volume is None or volume_sma_20 is None or volume_sma_20 == 0:
-        return {
-            "current": volume,
-            "sma_20": volume_sma_20,
-            "ratio": None,
-            "comment": "Недостаточно данных для оценки объёма."
-        }
-
-    ratio = volume / volume_sma_20
-
-    if ratio >= 1.8:
-        comment = "Текущий объём значительно выше среднего — активность заметно повышена."
-    elif ratio >= 1.2:
-        comment = "Текущий объём выше среднего — движение частично подтверждается объёмом."
-    elif ratio <= 0.7:
-        comment = "Текущий объём ниже среднего — движение пока слабо подтверждается объёмом."
-    else:
-        comment = "Текущий объём около среднего значения."
-
-    return {
-        "current": round(volume, 4),
-        "sma_20": round(volume_sma_20, 4),
-        "ratio": round(ratio, 2),
-        "comment": comment
-    }
-
-
-def interpret_funding(funding_rate: Optional[float]) -> dict:
-    if funding_rate is None:
-        return {
-            "value": None,
-            "percent": None,
-            "comment": "Funding rate недоступен."
-        }
-
-    funding_percent = funding_rate * 100
-
-    if funding_rate >= 0.0005:
-        comment = "Funding заметно положительный — лонги платят шортам, возможен перегрев лонгов."
-    elif funding_rate > 0.0001:
-        comment = "Funding положительный — настроение скорее бычье, но без явного экстремума."
-    elif funding_rate <= -0.0005:
-        comment = "Funding заметно отрицательный — шорты платят лонгам, возможен перегрев шортов."
-    elif funding_rate < -0.0001:
-        comment = "Funding отрицательный — настроение скорее осторожное или медвежье."
-    else:
-        comment = "Funding около нуля — сильного перекоса между лонгами и шортами не видно."
-
-    return {
-        "value": funding_rate,
-        "percent": round(funding_percent, 4),
-        "comment": comment
-    }
-
-
-def interpret_open_interest(oi_df: pd.DataFrame) -> dict:
-    """
-    Смотрим изменение open interest примерно за 24 часа.
-
-    Так как сейчас анализируем 1h open interest,
-    24 строки назад — это примерно сутки назад.
-    """
-    if oi_df.empty or len(oi_df) < 2:
-        return {
-            "value": None,
-            "change_24h_percent": None,
-            "comment": "Недостаточно данных для оценки open interest."
-        }
-
-    oi_df = oi_df.copy()
-    oi_df["open_interest"] = pd.to_numeric(oi_df["open_interest"], errors="coerce")
-
-    latest_oi = oi_df.iloc[0]["open_interest"]
-
-    if len(oi_df) >= 25:
-        previous_oi = oi_df.iloc[24]["open_interest"]
-    else:
-        previous_oi = oi_df.iloc[-1]["open_interest"]
-
-    if pd.isna(latest_oi) or pd.isna(previous_oi) or previous_oi == 0:
-        return {
-            "value": safe_float(latest_oi),
-            "change_24h_percent": None,
-            "comment": "Open interest есть, но изменение посчитать не удалось."
-        }
-
-    change_percent = ((latest_oi - previous_oi) / previous_oi) * 100
-
-    if change_percent >= 3:
-        comment = "Open interest заметно растёт — в рынок заходят новые позиции."
-    elif change_percent <= -3:
-        comment = "Open interest заметно снижается — часть позиций закрывается."
-    else:
-        comment = "Open interest меняется слабо — сильного притока или выхода позиций не видно."
-
-    return {
-        "value": round(float(latest_oi), 4),
-        "change_24h_percent": round(float(change_percent), 2),
-        "comment": comment
-    }
-
-
 def build_analysis(engine, symbol: str, interval: str) -> dict:
     latest = get_latest_market_row(engine, symbol, interval)
 
@@ -446,7 +241,7 @@ def build_analysis(engine, symbol: str, interval: str) -> dict:
         return {
             "symbol": symbol,
             "interval": interval,
-            "error": "Нет данных candles + indicators. Сначала запусти calculate_indicators.py."
+            "error": "Нет данных candles + indicators. Сначала запусти calculate_indicators.py.",
         }
 
     ticker = get_latest_ticker(engine, symbol)
@@ -467,7 +262,11 @@ def build_analysis(engine, symbol: str, interval: str) -> dict:
 
     # Для текущей цены берём ticker last_price, если он есть.
     # Если ticker недоступен, используем close_price последней свечи.
-    current_price = ticker_last_price if ticker_last_price is not None else candle_close_price
+    current_price = (
+        ticker_last_price
+        if ticker_last_price is not None
+        else candle_close_price
+    )
 
     ema_20 = safe_float(latest["ema_20"])
     ema_50 = safe_float(latest["ema_50"])
@@ -475,6 +274,7 @@ def build_analysis(engine, symbol: str, interval: str) -> dict:
     rsi_14 = safe_float(latest["rsi_14"])
     volume = safe_float(latest["volume"])
     volume_sma_20 = safe_float(latest["volume_sma_20"])
+
     funding_rate = get_latest_funding_rate(engine, symbol)
 
     # Если funding_rates почему-то пустая, пробуем взять funding из ticker.
@@ -507,57 +307,43 @@ def build_analysis(engine, symbol: str, interval: str) -> dict:
         "symbol": symbol,
         "interval": interval,
         "candle_time": str(latest["open_time"]),
-
         "price": {
             "current": round_or_none(current_price, 2),
             "last_candle_close": round_or_none(candle_close_price, 2),
             "mark_price": round_or_none(ticker_mark_price, 2),
             "index_price": round_or_none(ticker_index_price, 2),
         },
-
         "trend": interpret_trend(
             price=current_price,
             ema_20=ema_20,
             ema_50=ema_50,
             ema_200=ema_200,
         ),
-
         "ema": {
             "ema_20": round_or_none(ema_20, 2),
             "ema_50": round_or_none(ema_50, 2),
             "ema_200": round_or_none(ema_200, 2),
         },
-
         "rsi": interpret_rsi(rsi_14),
-
         "macd": interpret_macd(
             macd_line=latest["macd_line"],
             macd_signal=latest["macd_signal"],
             macd_hist=latest["macd_hist"],
         ),
-
-        "atr": {
-            "atr_14": round_or_none(latest["atr_14"], 2),
-            "comment": "ATR показывает средний диапазон движения цены за последние свечи."
-        },
-
+        "atr": interpret_atr(latest["atr_14"]),
         "volume": interpret_volume(
             volume=volume,
             volume_sma_20=volume_sma_20,
         ),
-
         "funding": interpret_funding(funding_rate),
-
         "open_interest": interpret_open_interest(oi_history),
-
         "ticker_open_interest": {
             "value": round_or_none(ticker_open_interest, 4),
-            "comment": "Это open interest из последнего ticker snapshot. Для динамики используется история из таблицы open_interest."
+            "comment": "Это open interest из последнего ticker snapshot. Для динамики используется история из таблицы open_interest.",
         },
-
         "support_resistance": support_resistance_analysis["support_resistance"],
         "scenarios": support_resistance_analysis["scenarios"],
-        "risk_note": "Это аналитический обзор по данным Bybit, а не финансовая рекомендация. Возможны ложные пробои, резкие выносы ликвидности и манипуляции."
+        "risk_note": "Это аналитический обзор по данным Bybit, а не финансовая рекомендация. Возможны ложные пробои, резкие выносы ликвидности и манипуляции.",
     }
 
     analysis["summary"] = build_summary(analysis)
