@@ -1,4 +1,4 @@
-﻿"""
+"""
 Telegram post template generator.
 
 Этот модуль получает готовый analysis JSON
@@ -39,9 +39,35 @@ def format_price(value) -> str:
     return str(value)
 
 
+def format_interval(interval: str) -> str:
+    mapping = {
+        "1": "1m",
+        "5": "5m",
+        "15": "15m",
+        "30": "30m",
+        "60": "1H",
+        "120": "2H",
+        "240": "4H",
+        "360": "6H",
+        "720": "12H",
+        "D": "1D",
+        "1D": "1D",
+    }
+
+    return mapping.get(str(interval), str(interval))
+
+
+def clean_comment(comment: str, prefixes: list[str]) -> str:
+    for prefix in prefixes:
+        if comment.startswith(prefix):
+            return comment[len(prefix):].strip()
+
+    return comment
+
+
 def build_telegram_post(analysis: dict[str, Any]) -> str:
     symbol = analysis.get("symbol", "UNKNOWN")
-    interval = analysis.get("interval", "UNKNOWN")
+    interval = format_interval(analysis.get("interval", "UNKNOWN"))
 
     current_price = get_nested(analysis, "price", "current")
     mark_price = get_nested(analysis, "price", "mark_price")
@@ -80,8 +106,8 @@ Index price: {format_price(index_price)}
 {trend_comment}
 
 \U0001f4ca \u0418\u043c\u043f\u0443\u043b\u044c\u0441
-RSI: {rsi_comment}
-MACD: {macd_comment}
+RSI: {clean_comment(rsi_comment, ["RSI: ", "RSI "])}
+MACD: {clean_comment(macd_comment, ["MACD: ", "MACD "])}
 
 \U0001f4e6 \u041e\u0431\u044a\u0451\u043c
 {volume_comment}
@@ -91,8 +117,8 @@ MACD: {macd_comment}
 \u0421\u043e\u043f\u0440\u043e\u0442\u0438\u0432\u043b\u0435\u043d\u0438\u0435: {format_levels(resistance_levels)}
 
 \U0001f4b8 \u0414\u0435\u0440\u0438\u0432\u0430\u0442\u0438\u0432\u044b
-Funding: {funding_comment}
-Open interest: {oi_comment}
+Funding: {clean_comment(funding_comment, ["Funding: ", "Funding "])}
+Open interest: {clean_comment(oi_comment, ["Open interest: ", "Open interest "])}
 
 \U0001f7e2 \u0421\u0446\u0435\u043d\u0430\u0440\u0438\u0439 \u0440\u043e\u0441\u0442\u0430
 {scenario_up}
