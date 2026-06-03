@@ -97,9 +97,9 @@ def build_main_risk(
         risks.append("open interest растёт, в рынок заходят новые позиции")
 
     if not risks:
-        return "лавный риск — ложный пробой ближайших уровней и резкий вынос ликвидности."
+        return "Главный риск — ложный пробой ближайших уровней и резкий вынос ликвидности."
 
-    return "Главный риск: " + "; ".join(risks) + "."
+    return "ГГлавный риск: " + "; ".join(risks) + "."
 
 
 def build_summary(analysis: dict[str, Any]) -> dict[str, Any]:
