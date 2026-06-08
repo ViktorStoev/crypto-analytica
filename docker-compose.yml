@@ -79,6 +79,31 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
+  
+  telegram_proxy:
+    build:
+      context: ./docker/opera-proxy
+      dockerfile: Dockerfile
+      args:
+        OPERA_PROXY_VERSION: v1.22.0
+
+    container_name: crypto_telegram_proxy
+    restart: unless-stopped
+
+    command:
+      - "-country"
+      - "EU"
+      - "-bind-address"
+      - "0.0.0.0:18080"
+      - "-server-selection"
+      - "fastest"
+      - "-init-retries"
+      - "0"
+      - "-verbosity"
+      - "20"
+
+    expose:
+      - "18080"
 
 volumes:
   timescaledb_data:

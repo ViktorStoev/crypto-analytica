@@ -37,6 +37,9 @@ if ENV_FILE.exists():
 
 BYBIT_BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.com")
 
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL")
 
 DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))

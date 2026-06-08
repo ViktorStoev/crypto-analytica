@@ -99,7 +99,7 @@ def build_main_risk(
     if not risks:
         return "Главный риск — ложный пробой ближайших уровней и резкий вынос ликвидности."
 
-    return "ГГлавный риск: " + "; ".join(risks) + "."
+    return "Главный риск: " + "; ".join(risks) + "."
 
 
 def build_summary(analysis: dict[str, Any]) -> dict[str, Any]:
