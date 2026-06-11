@@ -80,6 +80,49 @@ services:
       timescaledb:
         condition: service_healthy
   
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: crypto_scheduler
+    restart: unless-stopped
+
+    command:
+      - python
+      - scripts/run_scheduler.py
+
+    env_file:
+      - .env
+
+    environment:
+      PYTHONPATH: /app
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      BYBIT_BASE_URL: https://api.bybit.com
+
+      SCHEDULER_SYMBOL: BTCUSDT
+      SCHEDULER_INTERVAL: "60"
+      SCHEDULER_CRON_HOURS: "0,4,8,12,16,20"
+      SCHEDULER_CRON_MINUTE: "5"
+      SCHEDULER_TIMEZONE: UTC
+      SCHEDULER_NOTIFY: "false"
+      SCHEDULER_LOG_LEVEL: INFO
+
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      telegram_proxy:
+        condition: service_started
+
+    volumes:
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+
+    networks:
+      - default
+
   telegram_proxy:
     build:
       context: ./docker/opera-proxy

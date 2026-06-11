@@ -4,3 +4,4 @@ psycopg[binary]
 numpy
 pandas
 SQLAlchemy
+APScheduler==3.11.2
