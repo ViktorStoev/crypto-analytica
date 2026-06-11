@@ -233,7 +233,7 @@ def main() -> None:
         print()
         print(
             "Publication skipped: "
-            "a post for this candle already exists."
+            "a record for this candle already exists."
         )
         print(
             f"Publication ID: "
@@ -246,7 +246,28 @@ def main() -> None:
             f"Telegram message ID: "
             f"{result.telegram_message_id}"
         )
-        return
+
+        if result.status == "sent":
+            print()
+            print(
+                "The existing publication is confirmed "
+                "as successfully sent."
+            )
+            return
+
+        print()
+        print(
+            "The existing publication is not confirmed "
+            "as successfully sent."
+        )
+        print(
+            "Manual review is required before retrying."
+        )
+
+        if result.error_text:
+            print(f"Existing error: {result.error_text}")
+
+        sys.exit(2)
 
     if result.status != "sent":
         print()

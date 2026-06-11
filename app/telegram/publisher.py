@@ -58,7 +58,7 @@ class TelegramPublisher:
         token: str | None = None,
         chat_id: str | None = None,
         proxy_url: str | None = None,
-        timeout: float = 20.0,
+        timeout: float = 60.0,
         api_base_url: str = TELEGRAM_API_BASE_URL,
     ) -> None:
         self.token = (token or TELEGRAM_BOT_TOKEN or "").strip()

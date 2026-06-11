@@ -41,6 +41,9 @@ class PublicationResult:
     telegram_message_id: int | None = None
     error_text: str | None = None
 
+class PublicationResolutionError(RuntimeError):
+    """Ошибка ручного разрешения проблемной публикации."""
+
 
 def _normalize_candle_time(
     value: str | datetime,
@@ -148,7 +151,8 @@ def _reserve_publication(
             content,
             content_hash,
             status,
-            disable_notification
+            disable_notification,
+            last_attempt_at
         )
         VALUES (
             :post_type,
@@ -161,7 +165,8 @@ def _reserve_publication(
             :content,
             :content_hash,
             'pending',
-            :disable_notification
+            :disable_notification,
+            now()
         )
         ON CONFLICT (
             telegram_chat_id,
@@ -515,3 +520,302 @@ def register_existing_publication(
             ],
             error_text=existing["error_text"],
         )
+def get_publication_by_id(
+    engine: Engine,
+    publication_id: int,
+) -> dict[str, Any]:
+    """Получить публикацию по её внутреннему ID."""
+
+    query = text(
+        """
+        SELECT
+            id,
+            post_type,
+            exchange,
+            category,
+            symbol,
+            interval,
+            candle_time,
+            telegram_chat_id,
+            content,
+            content_hash,
+            status,
+            disable_notification,
+            telegram_message_id,
+            error_text,
+            retry_count,
+            last_attempt_at,
+            manual_reviewed_at,
+            manual_review_note,
+            created_at,
+            updated_at,
+            sent_at
+        FROM generated_posts
+        WHERE id = :publication_id
+        """
+    )
+
+    with engine.connect() as connection:
+        row = connection.execute(
+            query,
+            {
+                "publication_id": publication_id,
+            },
+        ).mappings().first()
+
+    if row is None:
+        raise PublicationResolutionError(
+            f"Publication id={publication_id} was not found."
+        )
+
+    return dict(row)
+
+
+def mark_unknown_publication_as_sent(
+    engine: Engine,
+    *,
+    publication_id: int,
+    telegram_message_id: int,
+    review_note: str,
+) -> PublicationResult:
+    """Подтвердить, что unknown-публикация реально появилась в Telegram."""
+
+    if telegram_message_id <= 0:
+        raise PublicationResolutionError(
+            "telegram_message_id must be greater than zero."
+        )
+
+    normalized_note = review_note.strip()
+
+    if not normalized_note:
+        raise PublicationResolutionError(
+            "A manual review note is required."
+        )
+
+    query = text(
+        """
+        UPDATE generated_posts
+        SET
+            status = 'sent',
+            telegram_message_id = :telegram_message_id,
+            error_text = NULL,
+            sent_at = COALESCE(sent_at, now()),
+            manual_reviewed_at = now(),
+            manual_review_note = :review_note,
+            updated_at = now()
+        WHERE id = :publication_id
+          AND status = 'unknown'
+        RETURNING
+            id,
+            status,
+            telegram_message_id,
+            error_text
+        """
+    )
+
+    with engine.begin() as connection:
+        row = connection.execute(
+            query,
+            {
+                "publication_id": publication_id,
+                "telegram_message_id": telegram_message_id,
+                "review_note": normalized_note[:2000],
+            },
+        ).mappings().first()
+
+        if row is None:
+            existing = connection.execute(
+                text(
+                    """
+                    SELECT id, status, telegram_message_id
+                    FROM generated_posts
+                    WHERE id = :publication_id
+                    """
+                ),
+                {
+                    "publication_id": publication_id,
+                },
+            ).mappings().first()
+
+            if existing is None:
+                raise PublicationResolutionError(
+                    f"Publication id={publication_id} was not found."
+                )
+
+            raise PublicationResolutionError(
+                "Publication cannot be marked as sent: "
+                f"id={publication_id}, "
+                f"current_status={existing['status']}, "
+                f"current_message_id="
+                f"{existing['telegram_message_id']}. "
+                "Only status=unknown can be resolved this way."
+            )
+
+    return PublicationResult(
+        publication_id=int(row["id"]),
+        status=str(row["status"]),
+        duplicate=False,
+        telegram_message_id=row["telegram_message_id"],
+        error_text=row["error_text"],
+    )
+
+
+def retry_unknown_publication(
+    engine: Engine,
+    publisher: TelegramPublisher,
+    *,
+    publication_id: int,
+    review_note: str,
+) -> PublicationResult:
+    """Повторить unknown-публикацию после ручного подтверждения отсутствия поста."""
+
+    normalized_note = review_note.strip()
+
+    if not normalized_note:
+        raise PublicationResolutionError(
+            "A manual review note is required."
+        )
+
+    # Сначала атомарно блокируем строку и переводим unknown → pending.
+    #
+    # FOR UPDATE не позволяет двум операторам одновременно
+    # разрешить повтор одной и той же публикации.
+    with engine.begin() as connection:
+        row = connection.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    status,
+                    content,
+                    disable_notification,
+                    telegram_message_id
+                FROM generated_posts
+                WHERE id = :publication_id
+                FOR UPDATE
+                """
+            ),
+            {
+                "publication_id": publication_id,
+            },
+        ).mappings().first()
+
+        if row is None:
+            raise PublicationResolutionError(
+                f"Publication id={publication_id} was not found."
+            )
+
+        if row["status"] != "unknown":
+            raise PublicationResolutionError(
+                "Publication cannot be retried: "
+                f"id={publication_id}, "
+                f"current_status={row['status']}. "
+                "Only status=unknown can be retried."
+            )
+
+        if row["telegram_message_id"] is not None:
+            raise PublicationResolutionError(
+                "Publication has telegram_message_id and cannot be retried."
+            )
+
+        connection.execute(
+            text(
+                """
+                UPDATE generated_posts
+                SET
+                    status = 'pending',
+                    error_text = NULL,
+                    retry_count = retry_count + 1,
+                    last_attempt_at = now(),
+                    manual_reviewed_at = now(),
+                    manual_review_note = :review_note,
+                    updated_at = now()
+                WHERE id = :publication_id
+                """
+            ),
+            {
+                "publication_id": publication_id,
+                "review_note": normalized_note[:2000],
+            },
+        )
+
+        content = str(row["content"])
+        disable_notification = bool(
+            row["disable_notification"]
+        )
+
+    # Сетевой запрос выполняем после завершения транзакции.
+    # Не держим блокировку строки во время обращения к Telegram.
+    try:
+        telegram_result = publisher.send_message(
+            text=content,
+            disable_notification=disable_notification,
+        )
+
+    except TelegramTimeoutError as exc:
+        _update_publication_status(
+            engine,
+            publication_id=publication_id,
+            status="unknown",
+            error_text=str(exc),
+        )
+
+        return PublicationResult(
+            publication_id=publication_id,
+            status="unknown",
+            duplicate=False,
+            error_text=str(exc),
+        )
+
+    except TelegramError as exc:
+        _update_publication_status(
+            engine,
+            publication_id=publication_id,
+            status="failed",
+            error_text=str(exc),
+        )
+
+        return PublicationResult(
+            publication_id=publication_id,
+            status="failed",
+            duplicate=False,
+            error_text=str(exc),
+        )
+
+    telegram_message_id = telegram_result.get(
+        "message_id"
+    )
+
+    if not isinstance(telegram_message_id, int):
+        error_text = (
+            "Telegram returned a successful response "
+            "without a valid message_id."
+        )
+
+        _update_publication_status(
+            engine,
+            publication_id=publication_id,
+            status="unknown",
+            error_text=error_text,
+        )
+
+        return PublicationResult(
+            publication_id=publication_id,
+            status="unknown",
+            duplicate=False,
+            error_text=error_text,
+        )
+
+    _update_publication_status(
+        engine,
+        publication_id=publication_id,
+        status="sent",
+        telegram_message_id=telegram_message_id,
+    )
+
+    return PublicationResult(
+        publication_id=publication_id,
+        status="sent",
+        duplicate=False,
+        telegram_message_id=telegram_message_id,
+    )
