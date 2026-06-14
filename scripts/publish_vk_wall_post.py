@@ -1,0 +1,43 @@
+from __future__ import annotations
+
+import json
+import sys
+
+from sqlalchemy import create_engine
+
+from app.analytics.data_loader import get_database_url
+from app.analytics.market_analysis import build_analysis
+from app.posting.vk_wall_formatter import build_vk_wall_post
+from app.vk.wall_publisher import VkWallPublisher
+
+
+def main() -> None:
+    if len(sys.argv) != 3:
+        print("Usage: python scripts/publish_vk_wall_post.py BTCUSDT 60")
+        sys.exit(1)
+
+    symbol = sys.argv[1].upper()
+    interval = sys.argv[2]
+
+    engine = create_engine(get_database_url())
+
+    analysis = build_analysis(
+        engine=engine,
+        symbol=symbol,
+        interval=interval,
+    )
+
+    if "error" in analysis:
+        print(analysis["error"])
+        sys.exit(1)
+
+    post = build_vk_wall_post(analysis)
+
+    publisher = VkWallPublisher.from_env()
+    result = publisher.publish_text(post)
+
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()
