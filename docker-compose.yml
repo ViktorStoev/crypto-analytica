@@ -72,6 +72,9 @@ services:
       BYBIT_BASE_URL: https://api.bybit.com
       PYTHONPATH: /app
 
+      TELEGRAM_PROXY_URL: http://tailscale:8080
+
+
     volumes:
       - ./app:/app/app
       - ./scripts:/app/scripts
@@ -79,6 +82,8 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
+      telegram_gateway:
+        condition: service_started
   
 
   scheduler:
@@ -110,10 +115,12 @@ services:
       SCHEDULER_NOTIFY: "false"
       SCHEDULER_LOG_LEVEL: INFO
 
+      TELEGRAM_PROXY_URL: http://tailscale:8080
+
     depends_on:
       timescaledb:
         condition: service_healthy
-      telegram_proxy:
+      telegram_gateway:
         condition: service_started
 
     volumes:
@@ -123,31 +130,73 @@ services:
     networks:
       - default
 
-  telegram_proxy:
-    build:
-      context: ./docker/opera-proxy
-      dockerfile: Dockerfile
-      args:
-        OPERA_PROXY_VERSION: v1.22.0
-
-    container_name: crypto_telegram_proxy
+  tailscale:
+    image: tailscale/tailscale:stable
+    container_name: crypto_tailscale
     restart: unless-stopped
 
-    command:
-      - "-country"
-      - "EU"
-      - "-bind-address"
-      - "0.0.0.0:18080"
-      - "-server-selection"
-      - "fastest"
-      - "-init-retries"
-      - "0"
-      - "-verbosity"
-      - "20"
+    hostname: crypto-analytica-tailscale
+
+    environment:
+      TS_AUTHKEY: ${TAILSCALE_AUTHKEY}
+      TS_HOSTNAME: crypto-analytica-tailscale
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_AUTH_ONCE: "true"
+
+      # Userspace mode is more reliable in Docker Desktop.
+      TS_USERSPACE: "true"
+
+      # Keep this proxy private inside the tailscale network namespace.
+      # Only telegram_gateway can reach it via 127.0.0.1 because it shares
+      # network_mode: service:tailscale.
+      TS_SOCKS5_SERVER: "127.0.0.1:1055"
+
+      TS_ACCEPT_DNS: "true"
+      TS_EXTRA_ARGS: "--exit-node=${TAILSCALE_EXIT_NODE} --exit-node-allow-lan-access"
+
+      TS_ENABLE_HEALTH_CHECK: "true"
+      TS_LOCAL_ADDR_PORT: "0.0.0.0:9002"
+
+    volumes:
+      - tailscale_state:/var/lib/tailscale
 
     expose:
-      - "18080"
+      - "9002"
 
+    healthcheck:
+      test: ["CMD", "tailscale", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+
+  telegram_gateway:
+    build:
+      context: ./docker/telegram-gateway
+      dockerfile: Dockerfile
+
+    container_name: crypto_telegram_gateway
+    restart: unless-stopped
+
+    network_mode: service:tailscale
+
+    environment:
+      TELEGRAM_GATEWAY_HOST: "0.0.0.0"
+      TELEGRAM_GATEWAY_PORT: "8080"
+      TELEGRAM_GATEWAY_ALLOWED_HOST: "api.telegram.org"
+      TELEGRAM_GATEWAY_ALLOWED_PORT: "443"
+
+      # Private upstream SOCKS5 proxy from tailscale userspace mode.
+      TELEGRAM_GATEWAY_UPSTREAM_SOCKS5_HOST: "127.0.0.1"
+      TELEGRAM_GATEWAY_UPSTREAM_SOCKS5_PORT: "1055"
+
+    depends_on:
+      tailscale:
+        condition: service_healthy
+
+        
 volumes:
   timescaledb_data:
   pgadmin_data:
+  tailscale_state:
