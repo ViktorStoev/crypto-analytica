@@ -53,8 +53,18 @@ SUPPORTED_POST_TYPES = {
     "alert",
     "chart_caption",
     "chart_only",
+    "daily_summary",
+    "rsi_tutorial",
+    "release_note",
     "market_analysis",
     "legacy_market_analysis",
+}
+STATIC_POST_TYPES = {
+    "rsi_tutorial",
+    "release_note",
+}
+MULTI_SYMBOL_POST_TYPES = {
+    "daily_summary",
 }
 
 
@@ -79,7 +89,19 @@ def parse_arguments() -> argparse.Namespace:
 
     parser.add_argument(
         "interval",
-        help="Candle interval. Currently supported: 60.",
+        help=(
+            "Candle interval. Currently supported: 60. "
+            "Use static for rsi_tutorial/release_note."
+        ),
+    )
+
+    parser.add_argument(
+        "--symbols",
+        nargs="+",
+        help=(
+            "Several Bybit symbols for multi-symbol post types, "
+            "for example: --symbols BTCUSDT ETHUSDT SOLUSDT."
+        ),
     )
 
     parser.add_argument(
@@ -122,11 +144,27 @@ def parse_arguments() -> argparse.Namespace:
 
     args.symbol = args.symbol.upper()
 
-    if args.interval not in SUPPORTED_INTERVALS:
+    if (
+        args.type not in STATIC_POST_TYPES
+        and args.interval not in SUPPORTED_INTERVALS
+    ):
         parser.error(
             "Only interval 60 is currently supported because "
             "collect_market_once.py collects 1H candles."
         )
+
+    if args.type in STATIC_POST_TYPES and args.interval != "static":
+        parser.error(
+            "Static post types require interval static."
+        )
+
+    if args.type in MULTI_SYMBOL_POST_TYPES:
+        symbols = args.symbols or [args.symbol]
+        if len(symbols) < 3:
+            parser.error(
+                "daily_summary requires at least 3 symbols, "
+                "for example: --symbols BTCUSDT ETHUSDT SOLUSDT"
+            )
 
     if args.notify and not args.send:
         parser.error(
@@ -198,6 +236,7 @@ def run_publication_job(
     symbol: str,
     interval: str,
     post_type: str,
+    symbols: list[str],
     no_event_ok: bool,
     send: bool,
     notify: bool,
@@ -211,25 +250,51 @@ def run_publication_job(
     print("=" * 70)
     print(f"Started at: {started_at:%Y-%m-%d %H:%M:%S} UTC")
     print(f"Symbol: {symbol}")
+    if symbols:
+        print(f"Symbols: {', '.join(symbols)}")
     print(f"Interval: {interval}")
     print(f"Post type: {post_type}")
     print(f"No-event OK: {no_event_ok}")
     print(f"Send enabled: {send}")
     print(f"Notifications enabled: {notify}")
 
-    run_python_step(
-        step_number=1,
-        step_name="Collect fresh Bybit market data",
-        script_name="collect_market_once.py",
-        arguments=[symbol],
-    )
+    if post_type in STATIC_POST_TYPES:
+        print()
+        print("=" * 70)
+        print("STEP 1-2: Skip market data refresh")
+        print("=" * 70)
+        print(
+            "Static content does not require Bybit collection "
+            "or indicator calculation."
+        )
 
-    run_python_step(
-        step_number=2,
-        step_name="Calculate technical indicators",
-        script_name="calculate_indicators.py",
-        arguments=[symbol, interval],
-    )
+    else:
+        analysis_symbols = (
+            symbols
+            if post_type in MULTI_SYMBOL_POST_TYPES
+            else [symbol]
+        )
+
+        run_python_step(
+            step_number=1,
+            step_name="Collect fresh Bybit market data",
+            script_name="collect_market_once.py",
+            arguments=analysis_symbols,
+        )
+
+        for index, analysis_symbol in enumerate(
+            analysis_symbols,
+            start=1,
+        ):
+            run_python_step(
+                step_number=2,
+                step_name=(
+                    "Calculate technical indicators "
+                    f"({index}/{len(analysis_symbols)})"
+                ),
+                script_name="calculate_indicators.py",
+                arguments=[analysis_symbol, interval],
+            )
 
     publication_arguments = [
         symbol,
@@ -237,6 +302,10 @@ def run_publication_job(
         "--type",
         post_type,
     ]
+
+    if symbols:
+        publication_arguments.append("--symbols")
+        publication_arguments.extend(symbols)
 
     if no_event_ok:
         publication_arguments.append("--no-event-ok")
@@ -298,6 +367,10 @@ def main() -> None:
             symbol=args.symbol,
             interval=args.interval,
             post_type=args.type,
+            symbols=[
+                item.upper()
+                for item in (args.symbols or [])
+            ],
             no_event_ok=args.no_event_ok,
             send=args.send,
             notify=args.notify,

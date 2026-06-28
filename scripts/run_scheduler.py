@@ -1,21 +1,13 @@
-"""Постоянный scheduler для автопубликации Telegram-постов.
+"""Multi-job scheduler for Telegram content publication.
 
-Ручная проверка одного запуска:
+Manual checks:
 
-docker compose run --rm scheduler python scripts/run_scheduler.py --run-once
+docker compose run --rm scheduler python scripts/run_scheduler.py --print-config
+docker compose run --rm scheduler python scripts/run_scheduler.py --run-once --job snapshot
 
-Постоянный режим:
+Permanent mode:
 
 docker compose up -d scheduler
-
-Расписание по умолчанию:
-
-00:05 UTC
-04:05 UTC
-08:05 UTC
-12:05 UTC
-16:05 UTC
-20:05 UTC
 """
 
 from __future__ import annotations
@@ -26,6 +18,7 @@ import os
 import signal
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -45,12 +38,44 @@ PUBLICATION_JOB_SCRIPT = PROJECT_ROOT / "scripts" / "run_publication_job.py"
 
 DEFAULT_SYMBOL = "BTCUSDT"
 DEFAULT_INTERVAL = "60"
-DEFAULT_POST_TYPE = "market_snapshot"
-DEFAULT_CRON_HOURS = "0,4,8,12,16,20"
-DEFAULT_CRON_MINUTE = "5"
 DEFAULT_TIMEZONE = "UTC"
 
+DEFAULT_SNAPSHOT_HOURS = "0,4,8,12,16,20"
+DEFAULT_SNAPSHOT_MINUTE = "5"
+DEFAULT_DEEP_DIVE_HOURS = "9,18"
+DEFAULT_DEEP_DIVE_MINUTE = "20"
+DEFAULT_ALERT_HOURS = "*"
+DEFAULT_ALERT_MINUTE = "*/30"
+DEFAULT_DAILY_SUMMARY_HOURS = "7,19"
+DEFAULT_DAILY_SUMMARY_MINUTE = "10"
+DEFAULT_DAILY_SUMMARY_SYMBOLS = "BTCUSDT ETHUSDT SOLUSDT"
+DEFAULT_TUTORIAL_DAY_OF_WEEK = "mon,thu"
+DEFAULT_TUTORIAL_HOURS = "11"
+DEFAULT_TUTORIAL_MINUTE = "0"
+DEFAULT_RELEASE_DAY_OF_WEEK = "fri"
+DEFAULT_RELEASE_HOURS = "12"
+DEFAULT_RELEASE_MINUTE = "0"
+
 LOGGER = logging.getLogger("crypto_telegram_scheduler")
+
+
+@dataclass(frozen=True)
+class ScheduledPublication:
+    """One scheduled content publication job."""
+
+    job_id: str
+    name: str
+    enabled: bool
+    symbol: str
+    interval: str
+    post_type: str
+    symbols: list[str]
+    cron_hours: str
+    cron_minute: str
+    timezone: ZoneInfo
+    notify: bool
+    no_event_ok: bool = False
+    day_of_week: str | None = None
 
 
 class SchedulerJobError(RuntimeError):
@@ -84,30 +109,63 @@ def get_env_value(
     return value.strip()
 
 
+def get_env_bool(
+    name: str,
+    default: bool,
+) -> bool:
+    """Read boolean environment value."""
+
+    raw_default = "true" if default else "false"
+    raw_value = get_env_value(name, raw_default).lower()
+
+    return raw_value in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
+
+def get_env_symbols(
+    name: str,
+    default: str,
+) -> list[str]:
+    """Read a comma- or space-separated symbol list."""
+
+    raw_value = get_env_value(name, default)
+    normalized = raw_value.replace(",", " ")
+
+    return [
+        item.strip().upper()
+        for item in normalized.split()
+        if item.strip()
+    ]
+
+
 def build_publication_command(
-    *,
-    symbol: str,
-    interval: str,
-    post_type: str,
-    no_event_ok: bool,
-    notify: bool,
+    job: ScheduledPublication,
 ) -> list[str]:
     """Сформировать команду запуска полной publication job."""
 
     command = [
         sys.executable,
         str(PUBLICATION_JOB_SCRIPT),
-        symbol,
-        interval,
+        job.symbol,
+        job.interval,
         "--type",
-        post_type,
+        job.post_type,
         "--send",
     ]
 
-    if no_event_ok:
+    if job.symbols:
+        command.append("--symbols")
+        command.extend(job.symbols)
+
+    if job.no_event_ok:
         command.append("--no-event-ok")
 
-    if notify:
+    if job.notify:
         command.append("--notify")
 
     return command
@@ -153,40 +211,30 @@ def run_command(
 
 
 def publication_job(
-    *,
-    symbol: str,
-    interval: str,
-    post_type: str,
-    no_event_ok: bool,
-    notify: bool,
+    job: ScheduledPublication,
 ) -> None:
-    """Функция, которую вызывает APScheduler."""
+    """Function called by APScheduler."""
 
     LOGGER.info(
         "Publication job started: "
-        "symbol=%s interval=%s post_type=%s no_event_ok=%s notify=%s",
-        symbol,
-        interval,
-        post_type,
-        no_event_ok,
-        notify,
+        "job_id=%s symbol=%s interval=%s post_type=%s symbols=%s "
+        "no_event_ok=%s notify=%s",
+        job.job_id,
+        job.symbol,
+        job.interval,
+        job.post_type,
+        ",".join(job.symbols) if job.symbols else "-",
+        job.no_event_ok,
+        job.notify,
     )
 
-    command = build_publication_command(
-        symbol=symbol,
-        interval=interval,
-        post_type=post_type,
-        no_event_ok=no_event_ok,
-        notify=notify,
-    )
-
+    command = build_publication_command(job)
     run_command(command)
 
     LOGGER.info(
-        "Publication job finished: symbol=%s interval=%s post_type=%s",
-        symbol,
-        interval,
-        post_type,
+        "Publication job finished: job_id=%s post_type=%s",
+        job.job_id,
+        job.post_type,
     )
 
 
@@ -227,8 +275,16 @@ def parse_arguments() -> argparse.Namespace:
         "--run-once",
         action="store_true",
         help=(
-            "Run one publication job immediately and exit. "
-            "Useful for manual testing."
+            "Run enabled publication jobs immediately and exit. "
+            "Use --job to run only one job."
+        ),
+    )
+
+    parser.add_argument(
+        "--job",
+        help=(
+            "Limit --run-once to one job id: snapshot, deep_dive, "
+            "alert, daily_summary, tutorial, release_note."
         ),
     )
 
@@ -241,94 +297,251 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_scheduler_config() -> dict[str, object]:
-    """Загрузить настройки scheduler из environment."""
-
-    symbol = get_env_value(
-        "SCHEDULER_SYMBOL",
-        DEFAULT_SYMBOL,
-    ).upper()
-
-    interval = get_env_value(
-        "SCHEDULER_INTERVAL",
-        DEFAULT_INTERVAL,
-    )
-
-    post_type = get_env_value(
-        "SCHEDULER_POST_TYPE",
-        DEFAULT_POST_TYPE,
-    )
-
-    cron_hours = get_env_value(
-        "SCHEDULER_CRON_HOURS",
-        DEFAULT_CRON_HOURS,
-    )
-
-    cron_minute = get_env_value(
-        "SCHEDULER_CRON_MINUTE",
-        DEFAULT_CRON_MINUTE,
-    )
+def build_jobs() -> list[ScheduledPublication]:
+    """Load scheduled publication jobs from environment."""
 
     timezone_name = get_env_value(
         "SCHEDULER_TIMEZONE",
         DEFAULT_TIMEZONE,
     )
-
-    notify_raw = get_env_value(
-        "SCHEDULER_NOTIFY",
-        "false",
-    ).lower()
-
-    no_event_ok_raw = get_env_value(
-        "SCHEDULER_NO_EVENT_OK",
-        "false",
-    ).lower()
-
-    notify = notify_raw in {
-        "1",
-        "true",
-        "yes",
-        "y",
-        "on",
-    }
-
-    no_event_ok = no_event_ok_raw in {
-        "1",
-        "true",
-        "yes",
-        "y",
-        "on",
-    }
-
     timezone_obj = ZoneInfo(timezone_name)
 
-    return {
-        "symbol": symbol,
-        "interval": interval,
-        "post_type": post_type,
-        "no_event_ok": no_event_ok,
-        "cron_hours": cron_hours,
-        "cron_minute": cron_minute,
-        "timezone_name": timezone_name,
-        "timezone": timezone_obj,
-        "notify": notify,
+    global_symbol = get_env_value(
+        "SCHEDULER_SYMBOL",
+        DEFAULT_SYMBOL,
+    ).upper()
+    global_interval = get_env_value(
+        "SCHEDULER_INTERVAL",
+        DEFAULT_INTERVAL,
+    )
+    global_notify = get_env_bool(
+        "SCHEDULER_NOTIFY",
+        False,
+    )
+
+    return [
+        ScheduledPublication(
+            job_id="snapshot",
+            name="Market snapshot",
+            enabled=get_env_bool("SCHEDULER_SNAPSHOT_ENABLED", True),
+            symbol=get_env_value(
+                "SCHEDULER_SNAPSHOT_SYMBOL",
+                global_symbol,
+            ).upper(),
+            interval=get_env_value(
+                "SCHEDULER_SNAPSHOT_INTERVAL",
+                global_interval,
+            ),
+            post_type="market_snapshot",
+            symbols=[],
+            cron_hours=get_env_value(
+                "SCHEDULER_SNAPSHOT_CRON_HOURS",
+                DEFAULT_SNAPSHOT_HOURS,
+            ),
+            cron_minute=get_env_value(
+                "SCHEDULER_SNAPSHOT_CRON_MINUTE",
+                DEFAULT_SNAPSHOT_MINUTE,
+            ),
+            timezone=timezone_obj,
+            notify=get_env_bool(
+                "SCHEDULER_SNAPSHOT_NOTIFY",
+                global_notify,
+            ),
+        ),
+        ScheduledPublication(
+            job_id="deep_dive",
+            name="Deep dive",
+            enabled=get_env_bool("SCHEDULER_DEEP_DIVE_ENABLED", True),
+            symbol=get_env_value(
+                "SCHEDULER_DEEP_DIVE_SYMBOL",
+                global_symbol,
+            ).upper(),
+            interval=get_env_value(
+                "SCHEDULER_DEEP_DIVE_INTERVAL",
+                global_interval,
+            ),
+            post_type="deep_dive",
+            symbols=[],
+            cron_hours=get_env_value(
+                "SCHEDULER_DEEP_DIVE_CRON_HOURS",
+                DEFAULT_DEEP_DIVE_HOURS,
+            ),
+            cron_minute=get_env_value(
+                "SCHEDULER_DEEP_DIVE_CRON_MINUTE",
+                DEFAULT_DEEP_DIVE_MINUTE,
+            ),
+            timezone=timezone_obj,
+            notify=get_env_bool(
+                "SCHEDULER_DEEP_DIVE_NOTIFY",
+                global_notify,
+            ),
+        ),
+        ScheduledPublication(
+            job_id="alert",
+            name="Event alert scan",
+            enabled=get_env_bool("SCHEDULER_ALERT_ENABLED", True),
+            symbol=get_env_value(
+                "SCHEDULER_ALERT_SYMBOL",
+                global_symbol,
+            ).upper(),
+            interval=get_env_value(
+                "SCHEDULER_ALERT_INTERVAL",
+                global_interval,
+            ),
+            post_type="alert",
+            symbols=[],
+            cron_hours=get_env_value(
+                "SCHEDULER_ALERT_CRON_HOURS",
+                DEFAULT_ALERT_HOURS,
+            ),
+            cron_minute=get_env_value(
+                "SCHEDULER_ALERT_CRON_MINUTE",
+                DEFAULT_ALERT_MINUTE,
+            ),
+            timezone=timezone_obj,
+            notify=get_env_bool(
+                "SCHEDULER_ALERT_NOTIFY",
+                global_notify,
+            ),
+            no_event_ok=get_env_bool(
+                "SCHEDULER_ALERT_NO_EVENT_OK",
+                True,
+            ),
+        ),
+        ScheduledPublication(
+            job_id="daily_summary",
+            name="Daily summary",
+            enabled=get_env_bool("SCHEDULER_DAILY_SUMMARY_ENABLED", False),
+            symbol="MARKET",
+            interval=get_env_value(
+                "SCHEDULER_DAILY_SUMMARY_INTERVAL",
+                global_interval,
+            ),
+            post_type="daily_summary",
+            symbols=get_env_symbols(
+                "SCHEDULER_DAILY_SUMMARY_SYMBOLS",
+                DEFAULT_DAILY_SUMMARY_SYMBOLS,
+            ),
+            cron_hours=get_env_value(
+                "SCHEDULER_DAILY_SUMMARY_CRON_HOURS",
+                DEFAULT_DAILY_SUMMARY_HOURS,
+            ),
+            cron_minute=get_env_value(
+                "SCHEDULER_DAILY_SUMMARY_CRON_MINUTE",
+                DEFAULT_DAILY_SUMMARY_MINUTE,
+            ),
+            timezone=timezone_obj,
+            notify=get_env_bool(
+                "SCHEDULER_DAILY_SUMMARY_NOTIFY",
+                global_notify,
+            ),
+        ),
+        ScheduledPublication(
+            job_id="tutorial",
+            name="RSI tutorial",
+            enabled=get_env_bool("SCHEDULER_TUTORIAL_ENABLED", False),
+            symbol="EDUCATION",
+            interval="static",
+            post_type="rsi_tutorial",
+            symbols=[],
+            cron_hours=get_env_value(
+                "SCHEDULER_TUTORIAL_CRON_HOURS",
+                DEFAULT_TUTORIAL_HOURS,
+            ),
+            cron_minute=get_env_value(
+                "SCHEDULER_TUTORIAL_CRON_MINUTE",
+                DEFAULT_TUTORIAL_MINUTE,
+            ),
+            day_of_week=get_env_value(
+                "SCHEDULER_TUTORIAL_DAY_OF_WEEK",
+                DEFAULT_TUTORIAL_DAY_OF_WEEK,
+            ),
+            timezone=timezone_obj,
+            notify=get_env_bool(
+                "SCHEDULER_TUTORIAL_NOTIFY",
+                global_notify,
+            ),
+        ),
+        ScheduledPublication(
+            job_id="release_note",
+            name="Release note",
+            enabled=get_env_bool("SCHEDULER_RELEASE_NOTE_ENABLED", False),
+            symbol="PROJECT",
+            interval="static",
+            post_type="release_note",
+            symbols=[],
+            cron_hours=get_env_value(
+                "SCHEDULER_RELEASE_NOTE_CRON_HOURS",
+                DEFAULT_RELEASE_HOURS,
+            ),
+            cron_minute=get_env_value(
+                "SCHEDULER_RELEASE_NOTE_CRON_MINUTE",
+                DEFAULT_RELEASE_MINUTE,
+            ),
+            day_of_week=get_env_value(
+                "SCHEDULER_RELEASE_NOTE_DAY_OF_WEEK",
+                DEFAULT_RELEASE_DAY_OF_WEEK,
+            ),
+            timezone=timezone_obj,
+            notify=get_env_bool(
+                "SCHEDULER_RELEASE_NOTE_NOTIFY",
+                global_notify,
+            ),
+        ),
+    ]
+
+
+def make_trigger(job: ScheduledPublication) -> CronTrigger:
+    """Build APScheduler cron trigger for one job."""
+
+    kwargs = {
+        "hour": job.cron_hours,
+        "minute": job.cron_minute,
+        "timezone": job.timezone,
     }
+
+    if job.day_of_week:
+        kwargs["day_of_week"] = job.day_of_week
+
+    return CronTrigger(**kwargs)
 
 
 def print_scheduler_config(
-    config: dict[str, object],
+    jobs: list[ScheduledPublication],
 ) -> None:
     """Показать настройки scheduler без секретов."""
 
-    print("Scheduler configuration:")
-    print(f"  symbol: {config['symbol']}")
-    print(f"  interval: {config['interval']}")
-    print(f"  post_type: {config['post_type']}")
-    print(f"  no_event_ok: {config['no_event_ok']}")
-    print(f"  cron_hours: {config['cron_hours']}")
-    print(f"  cron_minute: {config['cron_minute']}")
-    print(f"  timezone: {config['timezone_name']}")
-    print(f"  notify: {config['notify']}")
+    print("Scheduler jobs:")
+
+    for job in jobs:
+        day = job.day_of_week or "*"
+        symbols = ",".join(job.symbols) if job.symbols else "-"
+        print(
+            f"  {job.job_id}: enabled={job.enabled} "
+            f"type={job.post_type} symbol={job.symbol} symbols={symbols} "
+            f"interval={job.interval} cron={day} {job.cron_hours}:{job.cron_minute} "
+            f"notify={job.notify} no_event_ok={job.no_event_ok}"
+        )
+
+
+def enabled_jobs(
+    jobs: list[ScheduledPublication],
+    job_id: str | None,
+) -> list[ScheduledPublication]:
+    """Filter enabled jobs, optionally by id."""
+
+    result = [
+        job
+        for job in jobs
+        if job.enabled and (job_id is None or job.job_id == job_id)
+    ]
+
+    if job_id is not None and not any(job.job_id == job_id for job in jobs):
+        raise SchedulerJobError(
+            f"Unknown scheduler job id: {job_id}"
+        )
+
+    return result
 
 
 def main() -> None:
@@ -337,35 +550,32 @@ def main() -> None:
     setup_logging()
 
     args = parse_arguments()
-    config = load_scheduler_config()
+    jobs = build_jobs()
 
     if args.print_config:
-        print_scheduler_config(config)
+        print_scheduler_config(jobs)
         return
 
-    symbol = str(config["symbol"])
-    interval = str(config["interval"])
-    post_type = str(config["post_type"])
-    no_event_ok = bool(config["no_event_ok"])
-    cron_hours = str(config["cron_hours"])
-    cron_minute = str(config["cron_minute"])
-    timezone_obj = config["timezone"]
-    timezone_name = str(config["timezone_name"])
-    notify = bool(config["notify"])
+    selected_jobs = enabled_jobs(jobs, args.job)
 
-    if args.run_once:
-        LOGGER.info("Running scheduler job once and exiting.")
-        publication_job(
-            symbol=symbol,
-            interval=interval,
-            post_type=post_type,
-            no_event_ok=no_event_ok,
-            notify=notify,
+    if not selected_jobs:
+        LOGGER.warning(
+            "No enabled scheduler jobs selected. job_filter=%s",
+            args.job,
         )
         return
 
+    if args.run_once:
+        LOGGER.info(
+            "Running scheduler jobs once and exiting: jobs=%s",
+            ",".join(job.job_id for job in selected_jobs),
+        )
+        for job in selected_jobs:
+            publication_job(job)
+        return
+
     scheduler = BlockingScheduler(
-        timezone=timezone_obj,
+        timezone=selected_jobs[0].timezone,
     )
 
     scheduler.add_listener(
@@ -375,53 +585,37 @@ def main() -> None:
         | EVENT_JOB_MISSED,
     )
 
-    trigger = CronTrigger(
-        hour=cron_hours,
-        minute=cron_minute,
-        timezone=timezone_obj,
-    )
- 
-    next_run_time = trigger.get_next_fire_time(
-    None,
-    datetime.now(timezone_obj),
-    )
+    for job in selected_jobs:
+        trigger = make_trigger(job)
+        next_run_time = trigger.get_next_fire_time(
+            None,
+            datetime.now(job.timezone),
+        )
 
-    job = scheduler.add_job(
-        publication_job,
-        trigger=trigger,
-        id="btc_1h_telegram_publication",
-        name="BTCUSDT 1H Telegram publication",
-        kwargs={
-            "symbol": symbol,
-            "interval": interval,
-            "post_type": post_type,
-            "no_event_ok": no_event_ok,
-            "notify": notify,
-        },
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=600,
-        replace_existing=True,
-    )
+        scheduler.add_job(
+            publication_job,
+            trigger=trigger,
+            id=job.job_id,
+            name=job.name,
+            args=[job],
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=600,
+            replace_existing=True,
+        )
 
-    LOGGER.info(
-        "Scheduler started: symbol=%s interval=%s "
-        "post_type=%s no_event_ok=%s "
-        "cron_hours=%s cron_minute=%s timezone=%s notify=%s",
-        symbol,
-        interval,
-        post_type,
-        no_event_ok,
-        cron_hours,
-        cron_minute,
-        timezone_name,
-        notify,
-    )
-
-    LOGGER.info(
-        "Next run time: %s",
-        next_run_time,
-    )
+        LOGGER.info(
+            "Scheduled job: id=%s type=%s symbol=%s symbols=%s "
+            "cron_hours=%s cron_minute=%s day_of_week=%s next_run=%s",
+            job.job_id,
+            job.post_type,
+            job.symbol,
+            ",".join(job.symbols) if job.symbols else "-",
+            job.cron_hours,
+            job.cron_minute,
+            job.day_of_week or "*",
+            next_run_time,
+        )
 
     def handle_shutdown(signum, frame) -> None:
         LOGGER.info(

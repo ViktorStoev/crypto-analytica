@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 
 from sqlalchemy import create_engine
 
@@ -60,10 +61,16 @@ CONTENT_POST_TYPES = {
     "alert",
     "chart_caption",
     "chart_only",
+    "daily_summary",
+}
+
+STATIC_POST_TYPES = {
+    "rsi_tutorial",
+    "release_note",
 }
 
 SUPPORTED_POST_TYPES = sorted(
-    LEGACY_POST_TYPES | CONTENT_POST_TYPES
+    LEGACY_POST_TYPES | CONTENT_POST_TYPES | STATIC_POST_TYPES
 )
 
 
@@ -85,6 +92,15 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "interval",
         help="Candle interval, for example 60.",
+    )
+
+    parser.add_argument(
+        "--symbols",
+        nargs="+",
+        help=(
+            "Several Bybit symbols for multi-symbol post types, "
+            "for example: --symbols BTCUSDT ETHUSDT SOLUSDT."
+        ),
     )
 
     parser.add_argument(
@@ -166,17 +182,117 @@ def normalize_post_type(post_type: str) -> str:
 def build_post_text(
     *,
     post_type: str,
-    analysis: dict,
+    analysis: dict | None = None,
+    analyses: list[dict] | None = None,
 ) -> str:
     """Build Telegram text for the requested post type."""
 
     if post_type in LEGACY_POST_TYPES:
+        if analysis is None:
+            raise ValueError(
+                f"{post_type} requires single-symbol analysis"
+            )
         return build_telegram_post(analysis)
+
+    if post_type == "daily_summary":
+        return build_content_post(
+            post_type,  # type: ignore[arg-type]
+            analyses=analyses,
+        )
+
+    if post_type in STATIC_POST_TYPES:
+        return build_content_post(
+            post_type,  # type: ignore[arg-type]
+        )
+
+    if analysis is None:
+        raise ValueError(
+            f"{post_type} requires single-symbol analysis"
+        )
 
     return build_content_post(
         post_type,  # type: ignore[arg-type]
         analysis=analysis,
     )
+
+
+def build_single_analysis(
+    *,
+    engine,
+    symbol: str,
+    interval: str,
+) -> dict:
+    """Build analysis JSON for one symbol and fail clearly on missing data."""
+
+    analysis = build_analysis(
+        engine=engine,
+        symbol=symbol,
+        interval=interval,
+    )
+
+    if "error" in analysis:
+        raise RuntimeError(
+            f"{symbol}: {analysis['error']}"
+        )
+
+    return analysis
+
+
+def candle_time_for_publication(
+    *,
+    post_type: str,
+    analysis: dict | None,
+    analyses: list[dict],
+) -> str:
+    """Choose candle_time for generated_posts uniqueness."""
+
+    if post_type in STATIC_POST_TYPES:
+        return datetime.now(timezone.utc).replace(
+            second=0,
+            microsecond=0,
+        ).isoformat()
+
+    if post_type == "daily_summary":
+        candle_times = [
+            str(item.get("candle_time"))
+            for item in analyses
+            if item.get("candle_time")
+        ]
+
+        if not candle_times:
+            raise ValueError(
+                "Daily summary analyses do not contain candle_time."
+            )
+
+        return max(candle_times)
+
+    if analysis is None:
+        raise ValueError(
+            f"{post_type} analysis is missing."
+        )
+
+    candle_time = analysis.get("candle_time")
+
+    if not candle_time:
+        raise ValueError(
+            "Analysis does not contain candle_time."
+        )
+
+    return str(candle_time)
+
+
+def publication_symbol(
+    *,
+    post_type: str,
+    symbol: str,
+    symbols: list[str],
+) -> str:
+    """Choose symbol key stored in generated_posts."""
+
+    if post_type == "daily_summary":
+        return "+".join(symbols)
+
+    return symbol
 
 
 def main() -> None:
@@ -190,9 +306,15 @@ def main() -> None:
     stored_post_type = normalize_post_type(
         requested_post_type
     )
+    symbols = [
+        item.upper()
+        for item in (args.symbols or [symbol])
+    ]
 
     print("Building market analysis...")
     print(f"Symbol: {symbol}")
+    if requested_post_type == "daily_summary":
+        print(f"Symbols: {', '.join(symbols)}")
     print(f"Interval: {interval}")
     print(f"Post type: {stored_post_type}")
 
@@ -200,22 +322,30 @@ def main() -> None:
         get_database_url()
     )
 
-    analysis = build_analysis(
-        engine=engine,
-        symbol=symbol,
-        interval=interval,
-    )
-
-    if "error" in analysis:
-        print()
-        print("Analysis could not be built:")
-        print(analysis["error"])
-        sys.exit(1)
+    analysis = None
+    analyses: list[dict] = []
 
     try:
+        if requested_post_type == "daily_summary":
+            analyses = [
+                build_single_analysis(
+                    engine=engine,
+                    symbol=item,
+                    interval=interval,
+                )
+                for item in symbols
+            ]
+        elif requested_post_type not in STATIC_POST_TYPES:
+            analysis = build_single_analysis(
+                engine=engine,
+                symbol=symbol,
+                interval=interval,
+            )
+
         post = build_post_text(
             post_type=requested_post_type,
             analysis=analysis,
+            analyses=analyses,
         )
 
     except NoAlertEventError as exc:
@@ -226,19 +356,30 @@ def main() -> None:
             return
         sys.exit(2)
 
-    candle_time = analysis.get("candle_time")
-    current_price = (
-        analysis.get("price", {}).get("current")
-    )
-
-    if not candle_time:
-        print(
-            "Analysis does not contain candle_time."
-        )
+    except Exception as exc:  # noqa: BLE001 - CLI should print clear error
+        print()
+        print("Post could not be built:")
+        print(exc)
         sys.exit(1)
 
+    candle_time = candle_time_for_publication(
+        post_type=requested_post_type,
+        analysis=analysis,
+        analyses=analyses,
+    )
+    current_price = (
+        analysis.get("price", {}).get("current")
+        if analysis is not None
+        else "n/a"
+    )
+    stored_symbol = publication_symbol(
+        post_type=requested_post_type,
+        symbol=symbol,
+        symbols=symbols,
+    )
+
     print()
-    print("Analysis built successfully.")
+    print("Post built successfully.")
     print(f"Candle time: {candle_time}")
     print(f"Current price: {current_price}")
     print(
@@ -283,7 +424,7 @@ def main() -> None:
         result = register_existing_publication(
             engine=engine,
             publisher=publisher,
-            symbol=symbol,
+            symbol=stored_symbol,
             interval=interval,
             candle_time=candle_time,
             content=post,
@@ -314,7 +455,7 @@ def main() -> None:
     result = publish_telegram_post(
         engine=engine,
         publisher=publisher,
-        symbol=symbol,
+        symbol=stored_symbol,
         interval=interval,
         candle_time=candle_time,
         content=post,
