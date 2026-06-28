@@ -45,6 +45,7 @@ PUBLICATION_JOB_SCRIPT = PROJECT_ROOT / "scripts" / "run_publication_job.py"
 
 DEFAULT_SYMBOL = "BTCUSDT"
 DEFAULT_INTERVAL = "60"
+DEFAULT_POST_TYPE = "market_snapshot"
 DEFAULT_CRON_HOURS = "0,4,8,12,16,20"
 DEFAULT_CRON_MINUTE = "5"
 DEFAULT_TIMEZONE = "UTC"
@@ -87,6 +88,8 @@ def build_publication_command(
     *,
     symbol: str,
     interval: str,
+    post_type: str,
+    no_event_ok: bool,
     notify: bool,
 ) -> list[str]:
     """Сформировать команду запуска полной publication job."""
@@ -96,8 +99,13 @@ def build_publication_command(
         str(PUBLICATION_JOB_SCRIPT),
         symbol,
         interval,
+        "--type",
+        post_type,
         "--send",
     ]
+
+    if no_event_ok:
+        command.append("--no-event-ok")
 
     if notify:
         command.append("--notify")
@@ -148,29 +156,37 @@ def publication_job(
     *,
     symbol: str,
     interval: str,
+    post_type: str,
+    no_event_ok: bool,
     notify: bool,
 ) -> None:
     """Функция, которую вызывает APScheduler."""
 
     LOGGER.info(
-        "Publication job started: symbol=%s interval=%s notify=%s",
+        "Publication job started: "
+        "symbol=%s interval=%s post_type=%s no_event_ok=%s notify=%s",
         symbol,
         interval,
+        post_type,
+        no_event_ok,
         notify,
     )
 
     command = build_publication_command(
         symbol=symbol,
         interval=interval,
+        post_type=post_type,
+        no_event_ok=no_event_ok,
         notify=notify,
     )
 
     run_command(command)
 
     LOGGER.info(
-        "Publication job finished: symbol=%s interval=%s",
+        "Publication job finished: symbol=%s interval=%s post_type=%s",
         symbol,
         interval,
+        post_type,
     )
 
 
@@ -238,6 +254,11 @@ def load_scheduler_config() -> dict[str, object]:
         DEFAULT_INTERVAL,
     )
 
+    post_type = get_env_value(
+        "SCHEDULER_POST_TYPE",
+        DEFAULT_POST_TYPE,
+    )
+
     cron_hours = get_env_value(
         "SCHEDULER_CRON_HOURS",
         DEFAULT_CRON_HOURS,
@@ -258,7 +279,20 @@ def load_scheduler_config() -> dict[str, object]:
         "false",
     ).lower()
 
+    no_event_ok_raw = get_env_value(
+        "SCHEDULER_NO_EVENT_OK",
+        "false",
+    ).lower()
+
     notify = notify_raw in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
+    no_event_ok = no_event_ok_raw in {
         "1",
         "true",
         "yes",
@@ -271,6 +305,8 @@ def load_scheduler_config() -> dict[str, object]:
     return {
         "symbol": symbol,
         "interval": interval,
+        "post_type": post_type,
+        "no_event_ok": no_event_ok,
         "cron_hours": cron_hours,
         "cron_minute": cron_minute,
         "timezone_name": timezone_name,
@@ -287,6 +323,8 @@ def print_scheduler_config(
     print("Scheduler configuration:")
     print(f"  symbol: {config['symbol']}")
     print(f"  interval: {config['interval']}")
+    print(f"  post_type: {config['post_type']}")
+    print(f"  no_event_ok: {config['no_event_ok']}")
     print(f"  cron_hours: {config['cron_hours']}")
     print(f"  cron_minute: {config['cron_minute']}")
     print(f"  timezone: {config['timezone_name']}")
@@ -307,6 +345,8 @@ def main() -> None:
 
     symbol = str(config["symbol"])
     interval = str(config["interval"])
+    post_type = str(config["post_type"])
+    no_event_ok = bool(config["no_event_ok"])
     cron_hours = str(config["cron_hours"])
     cron_minute = str(config["cron_minute"])
     timezone_obj = config["timezone"]
@@ -318,6 +358,8 @@ def main() -> None:
         publication_job(
             symbol=symbol,
             interval=interval,
+            post_type=post_type,
+            no_event_ok=no_event_ok,
             notify=notify,
         )
         return
@@ -352,6 +394,8 @@ def main() -> None:
         kwargs={
             "symbol": symbol,
             "interval": interval,
+            "post_type": post_type,
+            "no_event_ok": no_event_ok,
             "notify": notify,
         },
         max_instances=1,
@@ -362,9 +406,12 @@ def main() -> None:
 
     LOGGER.info(
         "Scheduler started: symbol=%s interval=%s "
+        "post_type=%s no_event_ok=%s "
         "cron_hours=%s cron_minute=%s timezone=%s notify=%s",
         symbol,
         interval,
+        post_type,
+        no_event_ok,
         cron_hours,
         cron_minute,
         timezone_name,

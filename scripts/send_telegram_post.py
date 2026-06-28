@@ -32,6 +32,10 @@ from sqlalchemy import create_engine
 
 from app.analytics.data_loader import get_database_url
 from app.analytics.market_analysis import build_analysis
+from app.posting.content_renderer import (
+    NoAlertEventError,
+    build_post as build_content_post,
+)
 from app.posting.publication_service import (
     publish_telegram_post,
     register_existing_publication,
@@ -42,6 +46,24 @@ from app.posting.template_generator import (
 from app.telegram.publisher import (
     TelegramError,
     TelegramPublisher,
+)
+
+
+LEGACY_POST_TYPES = {
+    "market_analysis",
+    "legacy_market_analysis",
+}
+
+CONTENT_POST_TYPES = {
+    "market_snapshot",
+    "deep_dive",
+    "alert",
+    "chart_caption",
+    "chart_only",
+}
+
+SUPPORTED_POST_TYPES = sorted(
+    LEGACY_POST_TYPES | CONTENT_POST_TYPES
 )
 
 
@@ -63,6 +85,25 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "interval",
         help="Candle interval, for example 60.",
+    )
+
+    parser.add_argument(
+        "--type",
+        default="market_snapshot",
+        choices=SUPPORTED_POST_TYPES,
+        help=(
+            "Telegram post format. Default: market_snapshot. "
+            "Use market_analysis or legacy_market_analysis for the old template."
+        ),
+    )
+
+    parser.add_argument(
+        "--no-event-ok",
+        action="store_true",
+        help=(
+            "For --type alert: exit with code 0 when no alert rule fired. "
+            "Useful for scheduler/event scans."
+        ),
     )
 
     action_group = parser.add_mutually_exclusive_group()
@@ -102,7 +143,40 @@ def parse_arguments() -> argparse.Namespace:
             "--notify can only be used together with --send"
         )
 
+    if args.no_event_ok and args.type != "alert":
+        parser.error(
+            "--no-event-ok can only be used together with --type alert"
+        )
+
     return args
+
+
+def normalize_post_type(post_type: str) -> str:
+    """Normalize CLI aliases to values stored in generated_posts."""
+
+    if post_type == "legacy_market_analysis":
+        return "market_analysis"
+
+    if post_type == "chart_only":
+        return "chart_caption"
+
+    return post_type
+
+
+def build_post_text(
+    *,
+    post_type: str,
+    analysis: dict,
+) -> str:
+    """Build Telegram text for the requested post type."""
+
+    if post_type in LEGACY_POST_TYPES:
+        return build_telegram_post(analysis)
+
+    return build_content_post(
+        post_type,  # type: ignore[arg-type]
+        analysis=analysis,
+    )
 
 
 def main() -> None:
@@ -112,10 +186,15 @@ def main() -> None:
 
     symbol = args.symbol.upper()
     interval = args.interval
+    requested_post_type = args.type
+    stored_post_type = normalize_post_type(
+        requested_post_type
+    )
 
     print("Building market analysis...")
     print(f"Symbol: {symbol}")
     print(f"Interval: {interval}")
+    print(f"Post type: {stored_post_type}")
 
     engine = create_engine(
         get_database_url()
@@ -133,7 +212,19 @@ def main() -> None:
         print(analysis["error"])
         sys.exit(1)
 
-    post = build_telegram_post(analysis)
+    try:
+        post = build_post_text(
+            post_type=requested_post_type,
+            analysis=analysis,
+        )
+
+    except NoAlertEventError as exc:
+        print()
+        print(f"No alert post generated: {exc}")
+        if args.no_event_ok:
+            print("No-event alert scan completed successfully.")
+            return
+        sys.exit(2)
 
     candle_time = analysis.get("candle_time")
     current_price = (
@@ -156,7 +247,7 @@ def main() -> None:
 
     print()
     print("=" * 70)
-    print("TELEGRAM POST PREVIEW")
+    print(f"TELEGRAM POST PREVIEW: {stored_post_type}")
     print("=" * 70)
     print(post)
     print("=" * 70)
@@ -200,6 +291,7 @@ def main() -> None:
                 args.register_existing_message_id
             ),
             disable_notification=True,
+            post_type=stored_post_type,
         )
 
         print()
@@ -227,6 +319,7 @@ def main() -> None:
         candle_time=candle_time,
         content=post,
         disable_notification=not args.notify,
+        post_type=stored_post_type,
     )
 
     if result.duplicate:

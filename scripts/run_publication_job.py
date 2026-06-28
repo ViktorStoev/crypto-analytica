@@ -23,6 +23,12 @@ docker compose run --rm app \
 docker compose run --rm app \
     python scripts/run_publication_job.py \
     BTCUSDT 60 --send --notify
+
+Публикация подробного разбора:
+
+docker compose run --rm app \
+    python scripts/run_publication_job.py \
+    BTCUSDT 60 --type deep_dive --send
 """
 
 from __future__ import annotations
@@ -41,6 +47,15 @@ SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 # Текущий collect_market_once.py собирает именно часовые свечи.
 # Поэтому пока честно ограничиваем job интервалом 60.
 SUPPORTED_INTERVALS = {"60"}
+SUPPORTED_POST_TYPES = {
+    "market_snapshot",
+    "deep_dive",
+    "alert",
+    "chart_caption",
+    "chart_only",
+    "market_analysis",
+    "legacy_market_analysis",
+}
 
 
 class PublicationJobError(RuntimeError):
@@ -77,6 +92,24 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--type",
+        default="market_snapshot",
+        choices=sorted(SUPPORTED_POST_TYPES),
+        help=(
+            "Telegram post format. Default: market_snapshot. "
+            "Use market_analysis or legacy_market_analysis for the old template."
+        ),
+    )
+
+    parser.add_argument(
+        "--no-event-ok",
+        action="store_true",
+        help=(
+            "For --type alert: treat no detected event as a successful no-op."
+        ),
+    )
+
+    parser.add_argument(
         "--notify",
         action="store_true",
         help=(
@@ -98,6 +131,11 @@ def parse_arguments() -> argparse.Namespace:
     if args.notify and not args.send:
         parser.error(
             "--notify can only be used together with --send"
+        )
+
+    if args.no_event_ok and args.type != "alert":
+        parser.error(
+            "--no-event-ok can only be used together with --type alert"
         )
 
     return args
@@ -159,6 +197,8 @@ def run_publication_job(
     *,
     symbol: str,
     interval: str,
+    post_type: str,
+    no_event_ok: bool,
     send: bool,
     notify: bool,
 ) -> None:
@@ -172,6 +212,8 @@ def run_publication_job(
     print(f"Started at: {started_at:%Y-%m-%d %H:%M:%S} UTC")
     print(f"Symbol: {symbol}")
     print(f"Interval: {interval}")
+    print(f"Post type: {post_type}")
+    print(f"No-event OK: {no_event_ok}")
     print(f"Send enabled: {send}")
     print(f"Notifications enabled: {notify}")
 
@@ -192,7 +234,12 @@ def run_publication_job(
     publication_arguments = [
         symbol,
         interval,
+        "--type",
+        post_type,
     ]
+
+    if no_event_ok:
+        publication_arguments.append("--no-event-ok")
 
     if send:
         publication_arguments.append("--send")
@@ -250,6 +297,8 @@ def main() -> None:
         run_publication_job(
             symbol=args.symbol,
             interval=args.interval,
+            post_type=args.type,
+            no_event_ok=args.no_event_ok,
             send=args.send,
             notify=args.notify,
         )
