@@ -29,6 +29,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Create CI environment
+        run: cp .env.exaple .env
+
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
