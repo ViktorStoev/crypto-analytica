@@ -63,3 +63,33 @@ jobs:
 
       - name: Build containers
         run: docker compose build app telegram_gateway
+  deploy:
+    name: Deploy production
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs:
+      - test
+      - container
+
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - crypto-prod
+
+    environment: production
+
+    concurrency:
+      group: production
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout deployment scripts
+        uses: actions/checkout@v4
+
+      - name: Deploy tested commit
+        env:
+          PROD_PATH: /home/bubble/projects/crypto-analytica
+        run: |
+          bash scripts/deploy.sh \
+            "${{ github.sha }}" \
+            "$PROD_PATH"
