@@ -119,6 +119,33 @@ Analyze symbol:
 docker compose run --rm app python scripts/analyze_symbol.py BTCUSDT
 ```
 
+## Daily summary production enablement
+
+`daily_summary` is disabled by default. Prepare BTC/ETH/SOL data before enabling it permanently.
+
+Bootstrap candles, fresh market data and indicators:
+
+```bash
+docker compose run --rm app python scripts/bootstrap_daily_summary_symbols.py --symbols BTCUSDT ETHUSDT SOLUSDT --interval 60 --days 180
+```
+
+Preview the generated post:
+
+```bash
+docker compose run --rm app python scripts/generate_content_post.py --type daily_summary --symbols BTCUSDT ETHUSDT SOLUSDT --interval 60
+```
+
+Run the scheduler job once with daily summary enabled only for this command:
+
+```bash
+docker compose run --rm -e SCHEDULER_DAILY_SUMMARY_ENABLED=true scheduler python scripts/run_scheduler.py --run-once --job daily_summary
+```
+
+Enable it permanently in local `.env` after bootstrap succeeds:
+
+```bash
+SCHEDULER_DAILY_SUMMARY_ENABLED=true
+```
 ## Notes
 
 This project is currently an MVP and is intended for local development and experimentation.

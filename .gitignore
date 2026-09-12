@@ -1,4 +1,4 @@
-@"
+
 # Environment variables / secrets
 .env
 .env.*
@@ -45,4 +45,3 @@ pgadmin_data/
 # OS
 .DS_Store
 Thumbs.db
-"@ | Set-Content .gitignore
