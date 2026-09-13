@@ -55,6 +55,9 @@ podman compose \
     -f docker-compose.podman.yml \
     build app scheduler telegram_gateway
 
+echo "Removing stale one-shot app container..."
+podman rm -f crypto_app 2>/dev/null || true
+
 echo "Rolling out application services..."
 podman compose \
     -f docker-compose.yml \
