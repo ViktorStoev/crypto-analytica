@@ -49,16 +49,44 @@ podman compose \
     -f docker-compose.podman.yml \
     config --quiet
 
-echo "Deploying..."
+echo "Building application images..."
 podman compose \
     -f docker-compose.yml \
     -f docker-compose.podman.yml \
-    up -d --build --remove-orphans
+    build app scheduler telegram_gateway
+
+echo "Rolling out application services..."
+podman compose \
+    -f docker-compose.yml \
+    -f docker-compose.podman.yml \
+    up -d \
+    --force-recreate \
+    --no-deps \
+    scheduler telegram_gateway
 
 echo "Current containers:"
 podman compose \
     -f docker-compose.yml \
     -f docker-compose.podman.yml \
     ps
+
+echo "Verifying production services..."
+
+scheduler_state="$(podman inspect crypto_scheduler --format '{{.State.Status}}')"
+gateway_state="$(podman inspect crypto_telegram_gateway --format '{{.State.Status}}')"
+tailscale_health="$(podman inspect crypto_tailscale --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}')"
+db_health="$(podman inspect crypto_timescaledb --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}')"
+
+echo "scheduler:        $scheduler_state"
+echo "telegram_gateway: $gateway_state"
+echo "tailscale:        $tailscale_health"
+echo "timescaledb:      $db_health"
+
+[[ "$scheduler_state" == "running" ]]
+[[ "$gateway_state" == "running" ]]
+[[ "$tailscale_health" == "healthy" ]]
+[[ "$db_health" == "healthy" ]]
+
+echo "Deployment health verification passed."
 
 echo "Deployment completed successfully."
