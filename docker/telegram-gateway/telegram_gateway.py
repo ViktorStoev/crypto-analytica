@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 import select
+import signal
 import socket
 import socketserver
 import struct
 import sys
 import time
 import traceback
+from types import FrameType
 from typing import Final
 
 
@@ -533,7 +535,19 @@ class ThreadingTCPServer(
     daemon_threads = True
 
 
+def handle_shutdown_signal(
+    signum: int,
+    frame: FrameType | None,
+) -> None:
+    signal_name = signal.Signals(signum).name
+    log(f"Shutdown signal received: signal={signal_name}")
+    raise SystemExit(0)
+
+
 def main() -> None:
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+
     upstream_mode = (
         f"socks5://{UPSTREAM_SOCKS5_HOST}:{UPSTREAM_SOCKS5_PORT}"
         if UPSTREAM_SOCKS5_HOST and UPSTREAM_SOCKS5_PORT
