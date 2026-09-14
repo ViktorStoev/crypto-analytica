@@ -68,6 +68,9 @@ RELAY_IDLE_TIMEOUT_SECONDS: Final[float] = float(
 )
 
 BUFFER_SIZE: Final[int] = 65536
+SERVER_POLL_INTERVAL_SECONDS: Final[float] = 0.1
+
+_shutdown_requested = False
 
 
 def log(message: str) -> None:
@@ -536,15 +539,17 @@ class ThreadingTCPServer(
 
 
 def handle_shutdown_signal(
-    signum: int,
-    frame: FrameType | None,
+    _signum: int,
+    _frame: FrameType | None,
 ) -> None:
-    signal_name = signal.Signals(signum).name
-    log(f"Shutdown signal received: signal={signal_name}")
-    raise SystemExit(0)
+    global _shutdown_requested
+    _shutdown_requested = True
 
 
 def main() -> None:
+    global _shutdown_requested
+    _shutdown_requested = False
+
     signal.signal(signal.SIGTERM, handle_shutdown_signal)
     signal.signal(signal.SIGINT, handle_shutdown_signal)
 
@@ -566,7 +571,10 @@ def main() -> None:
         (LISTEN_HOST, LISTEN_PORT),
         TelegramOnlyProxyHandler,
     ) as server:
-        server.serve_forever()
+        server.timeout = SERVER_POLL_INTERVAL_SECONDS
+
+        while not _shutdown_requested:
+            server.handle_request()
 
 
 if __name__ == "__main__":
